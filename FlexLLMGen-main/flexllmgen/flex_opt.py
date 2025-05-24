@@ -24,6 +24,7 @@ from flexllmgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
     torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
     read_benchmark_log)
+from flexllmgen.vector_quant import VectorQuantConfig
 
 fix_recursive_import()
 
@@ -66,6 +67,9 @@ class Policy:
     compress_cache: bool
     comp_cache_config: CompressionConfig
 
+    vector_quant: bool
+    vector_quant_config: VectorQuantConfig
+
     @property
     def w_disk_percent(self):
         return 100 - self.w_gpu_percent - self.w_cpu_percent
@@ -96,6 +100,8 @@ def init_weight_list(weight_specs, policy, env):
     sizes = [np.prod(spec[0]) for spec in weight_specs]
     sizes_cumsum = np.cumsum(sizes)
     ret = []
+    ret_codebook = []
+    idx_position = []
     for i in range(len(weight_specs)):
         mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
         home = get_choice(mid_percent * 100, dev_percents, dev_choices)
@@ -104,19 +110,12 @@ def init_weight_list(weight_specs, policy, env):
         if len(shape) < 2:
             pin_memory = True
             compress = False
+            vector_quant = False
         else:
             pin_memory = policy.pin_weight
             compress = policy.compress_weight
-
-        if not compress:
-            weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
-            else:
-                weight.load_from_np(np.ones(shape, dtype))
-                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
-        else:
+            vector_quant = policy.vector_quant
+        if compress:
             weight = home.compressed_device.allocate(
                 shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
 
@@ -126,9 +125,38 @@ def init_weight_list(weight_specs, policy, env):
                 for i in range(2):
                     x = weight.data[i]
                     x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
+            
+            ret.append(weight)
+            idx_position.append(-1)
+        elif vector_quant:
+            weight = home.vector_quant_device.allocate(
+                shape, dtype, policy.vector_quant_config, pin_memory=pin_memory)
+            codebook = home.vector_quant_device.allocate(shape, dtype, policy.vector_quant_config, pin_memory=pin_memory, codebook=True, quantizer=weight.data[1])
+            
+            if DUMMY_WEIGHT not in filename:
+                weight.load_from_np_file(weight_specs[i][2])
+            else:
+                for i in range(2):
+                    x = weight.data[i]
+                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
 
-        ret.append(weight)
-    return ret
+            ret.append(weight)
+            ret_codebook.append(codebook)
+            idx_position.append(len(codebook)-1)
+        else:
+
+            weight = home.allocate(shape, dtype, pin_memory=pin_memory)
+
+            if DUMMY_WEIGHT not in filename:
+                weight.load_from_np_file(weight_specs[i][2])
+            else:
+                weight.load_from_np(np.ones(shape, dtype))
+                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
+
+            ret.append(weight)
+            idx_position.append(-1)
+
+    return ret, ret_codebook, idx_position
 
 
 class InputEmbed:
@@ -137,8 +165,9 @@ class InputEmbed:
         self.env = env
         self.policy = policy
         self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-            else self.compute)
+        self.weight_load_dst = (self.compute.vector_quant_device if policy.vector_quant else
+                        self.compute.compressed_device if policy.compress_weight else
+                        self.compute)
 
         self.task = None
 
@@ -160,10 +189,16 @@ class InputEmbed:
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        w_token, w_pos = weight_home.val
+        # w_token, w_pos = weight_home.val
+        weight, codebook, idx_position = weight_home.val
         if k == 0:
             dst = self.weight_load_dst
-            weight_read_buf.store((w_token.smart_copy(dst), w_pos.smart_copy(dst)))
+            # 1. 复制idx列表中的所有张量
+            copied_weight = [tensor_copy for tensor_copy, _ in (tensor.smart_copy(dst) for tensor in weight)]
+        
+            # 2. 复制codebook列表中的所有张量
+            copied_codebook = [tensor_copy for tensor_copy, _ in (tensor.smart_copy(dst) for tensor in codebook)]
+            weight_read_buf.store((copied_weight, copied_codebook, idx_position))
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -186,12 +221,16 @@ class InputEmbed:
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            (w_token, donate[2]), (w_pos, donate[3]) = weight_read_buf.pop()
+            # (w_token, donate[2]), (w_pos, donate[3]) = weight_read_buf.pop()
+            weight, codebook, idx_position = weight_read_buf.pop()
         else:
-            (w_token, _), (w_pos, _) = weight_read_buf.val
+            # (w_token, _), (w_pos, _) = weight_read_buf.val
+            weight, codebook, idx_position = weight_read_buf.val
 
+        # h = self.compute.opt_input_embed(h, mask,
+        #     w_token, w_pos, self.config.pad_token_id, donate)
         h = self.compute.opt_input_embed(h, mask,
-            w_token, w_pos, self.config.pad_token_id, donate)
+            weight, codebook, idx_position, self.config.pad_token_id, donate)
         hidden.val = h
 
 
@@ -201,8 +240,9 @@ class OutputEmbed:
         self.env = env
         self.policy = policy
         self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-            else self.compute)
+        self.weight_load_dst = (self.compute.vector_quant_device if policy.vector_quant else
+                        self.compute.compressed_device if policy.compress_weight else
+                        self.compute)
 
         self.task = None
 
@@ -226,12 +266,30 @@ class OutputEmbed:
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        w_ln, b_ln, w_token = weight_home.val
+        # w_ln, b_ln, w_token = weight_home.val
+        weight, codebook, idx_position = weight_home.val
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
-            weight_read_buf.store((w_ln.smart_copy(dst2), b_ln.smart_copy(dst2),
-                w_token.smart_copy(dst1)))
+            # weight_read_buf.store((w_ln.smart_copy(dst2), b_ln.smart_copy(dst2),
+            #     w_token.smart_copy(dst1)))
+            # 根据张量形状决定目标设备
+            copied_weight = []
+            for tensor in weight:
+                # 如果是矩阵权重，复制到dst1，否则复制到dst2
+                dst = dst1 if len(tensor.shape) > 1 else dst2
+                tensor_copy, _ = tensor.smart_copy(dst)
+                copied_weight.append(tensor_copy)
+            
+            # 对codebook执行相同操作
+            copied_codebook = []
+            for tensor in codebook:
+                dst = dst1 if len(tensor.shape) > 1 else dst2
+                tensor_copy, _ = tensor.smart_copy(dst)
+                copied_codebook.append(tensor_copy)
+            
+            # 存储复制后的结果
+            weight_read_buf.store((copied_weight, copied_codebook, idx_position))
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -252,11 +310,13 @@ class OutputEmbed:
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            (w_ln, donate[1]), (b_ln, donate[2]), (w_token, donate[3]) = weight_read_buf.pop()
+            # (w_ln, donate[1]), (b_ln, donate[2]), (w_token, donate[3]) = weight_read_buf.pop()
+            weight, codebook, idx_position = weight_read_buf.pop()
         else:
-            (w_ln, _), (b_ln, _), (w_token, _) = weight_read_buf.val
+            # (w_ln, _), (b_ln, _), (w_token, _) = weight_read_buf.val
+            weight, codebook, idx_position = weight_read_buf.val
 
-        h = self.compute.opt_output_embed(h, w_ln, b_ln, w_token, donate,
+        h = self.compute.opt_output_embed(h, weight, codebook, idx_position, donate,
             self.task.do_sample, self.task.temperature)
         hidden.val = h
 
@@ -268,8 +328,9 @@ class SelfAttention:
         self.layer_id = layer_id
         self.policy = policy
         self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-            else self.compute)
+        self.weight_load_dst = (self.compute.vector_quant_device if policy.vector_quant else
+                        self.compute.compressed_device if policy.compress_weight else
+                        self.compute)
         self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
             else self.env.gpu)
 
@@ -307,16 +368,33 @@ class SelfAttention:
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
+        # w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
+        weight, codebook, idx_position = weight_home.val
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
-            weight_read_buf.store((
-                w_q.smart_copy(dst1), b_q.smart_copy(dst2),
-                w_k.smart_copy(dst1), b_k.smart_copy(dst2),
-                w_v.smart_copy(dst1), b_v.smart_copy(dst2),
-                w_out.smart_copy(dst1), b_out.smart_copy(dst2),
-                w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
+            copied_weight = []
+            for tensor in weight:
+                # 如果是矩阵权重，复制到dst1，否则复制到dst2
+                dst = dst1 if len(tensor.shape) > 1 else dst2
+                tensor_copy, _ = tensor.smart_copy(dst)
+                copied_weight.append(tensor_copy)
+            
+            # 对codebook执行相同操作
+            copied_codebook = []
+            for tensor in codebook:
+                dst = dst1 if len(tensor.shape) > 1 else dst2
+                tensor_copy, _ = tensor.smart_copy(dst)
+                copied_codebook.append(tensor_copy)
+            
+            # 存储复制后的结果
+            weight_read_buf.store((copied_weight, copied_codebook, idx_position))
+            # weight_read_buf.store((
+            #     w_q.smart_copy(dst1), b_q.smart_copy(dst2),
+            #     w_k.smart_copy(dst1), b_k.smart_copy(dst2),
+            #     w_v.smart_copy(dst1), b_v.smart_copy(dst2),
+            #     w_out.smart_copy(dst1), b_out.smart_copy(dst2),
+            #     w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
 
     def init_cache_one_gpu_batch(self, cache_home):
         if self.policy.cache_gpu_percent == 100:
@@ -433,25 +511,34 @@ class SelfAttention:
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            ((w_q, donate[2]), (b_q, donate[3]), (w_k, donate[4]), (b_k, donate[5]),
-             (w_v, donate[6]), (b_v, donate[7]), (w_out, donate[8]), (b_out, donate[9]),
-             (w_ln, donate[10]), (b_ln, donate[11])) = weight_read_buf.pop()
+            # ((w_q, donate[2]), (b_q, donate[3]), (w_k, donate[4]), (b_k, donate[5]),
+            #  (w_v, donate[6]), (b_v, donate[7]), (w_out, donate[8]), (b_out, donate[9]),
+            #  (w_ln, donate[10]), (b_ln, donate[11])) = weight_read_buf.pop()
+            weight, codebook, idx_position = weight_read_buf.pop()
         else:
-            ((w_q, _), (b_q, _), (w_k, _), (b_k, _),
-             (w_v, _), (b_v, _), (w_out, _), (b_out, _),
-             (w_ln, _), (b_ln, _)) = weight_read_buf.val
+            # ((w_q, _), (b_q, _), (w_k, _), (b_k, _),
+            #  (w_v, _), (b_v, _), (w_out, _), (b_out, _),
+            #  (w_ln, _), (b_ln, _)) = weight_read_buf.val
+            weight, codebook, idx_position = weight_read_buf.val
 
         if i == 0:  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
-                w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
+            # h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
+            #     w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
+            #     self.policy.compress_cache, self.policy.comp_cache_config)
+            h, new_k_cache, new_v_cache = self.compute.mha(h, mask, weight, 
+                    codebook, idx_position, n_head, donate,
                 self.policy.compress_cache, self.policy.comp_cache_config)
             cache_write_buf.store((new_k_cache, new_v_cache))
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
-            h, new_k_cache, new_v_cache = self.compute.mha_gen(h, mask, w_q,
-                b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
+            # h, new_k_cache, new_v_cache = self.compute.mha_gen(h, mask, w_q,
+            #     b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
+            #     k_cache, v_cache, donate, self.policy.attn_sparsity,
+            #     self.policy.compress_cache, self.policy.comp_cache_config)
+            h, new_k_cache, new_v_cache = self.compute.mha_gen(h, mask, weight, 
+                    codebook, idx_position, n_head,
                 k_cache, v_cache, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config)
             cache_write_buf.store((new_k_cache, new_v_cache))
@@ -466,8 +553,9 @@ class MLP:
         self.layer_id = layer_id
         self.policy = policy
         self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-            else self.compute)
+        self.weight_load_dst = (self.compute.vector_quant_device if policy.vector_quant else
+                        self.compute.compressed_device if policy.compress_weight else
+                        self.compute)
 
         self.task = None
 
@@ -495,14 +583,32 @@ class MLP:
         weight_home.store(weights)
 
     def load_weight(self, weight_home, weight_read_buf, k):
-        wi, bi, wo, bo, w_ln, b_ln = weight_home.val
+        # wi, bi, wo, bo, w_ln, b_ln = weight_home.val
+        weight, codebook, idx_position = weight_home.val
         if k == 0:
             dst1 = self.weight_load_dst
             dst2 = self.compute
-            weight_read_buf.store((
-                wi.smart_copy(dst1), bi.smart_copy(dst2),
-                wo.smart_copy(dst1), bo.smart_copy(dst2),
-                w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
+            # 根据张量形状决定目标设备
+            copied_weight = []
+            for tensor in weight:
+                # 如果是矩阵权重，复制到dst1，否则复制到dst2
+                dst = dst1 if len(tensor.shape) > 1 else dst2
+                tensor_copy, _ = tensor.smart_copy(dst)
+                copied_weight.append(tensor_copy)
+            
+            # 对codebook执行相同操作
+            copied_codebook = []
+            for tensor in codebook:
+                dst = dst1 if len(tensor.shape) > 1 else dst2
+                tensor_copy, _ = tensor.smart_copy(dst)
+                copied_codebook.append(tensor_copy)
+
+            # 存储复制后的结果
+            weight_read_buf.store((copied_weight, copied_codebook, idx_position))
+            # weight_read_buf.store((
+            #     wi.smart_copy(dst1), bi.smart_copy(dst2),
+            #     wo.smart_copy(dst1), bo.smart_copy(dst2),
+            #     w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -523,13 +629,16 @@ class MLP:
 
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
-            ((wi, donate[1]), (bi, donate[2]), (wo, donate[3]), (bo, donate[4]),
-             (w_ln, donate[5]), (b_ln, donate[6])) = weight_read_buf.pop()
+            # ((wi, donate[1]), (bi, donate[2]), (wo, donate[3]), (bo, donate[4]),
+            #  (w_ln, donate[5]), (b_ln, donate[6])) = weight_read_buf.pop()
+            weight, codebook, idx_position = weight_read_buf.pop()
         else:
-            ((wi, _), (bi, _), (wo, _), (bo, _),
-             (w_ln, _), (b_ln, _)) = weight_read_buf.val
+            # ((wi, _), (bi, _), (wo, _), (bo, _),
+            #  (w_ln, _), (b_ln, _)) = weight_read_buf.val
+            weight, codebook, idx_position = weight_read_buf.val
 
-        h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
+        # h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
+        h = self.compute.mlp(h, weight, codebook, idx_position, donate)
         hidden.val = h
 
 
@@ -1164,6 +1273,8 @@ def get_filename(args):
         filename += "gpu-cache"
     if args.compress_weight:
         filename += "-compw"
+    if args.vector_quant:
+        filename += "-vq"
     if args.compress_cache:
         filename += "-compc"
     return filename
@@ -1205,7 +1316,9 @@ def run_flexllmgen(args):
                                       group_dim=0, symmetric=False),
                     args.compress_cache,
                     CompressionConfig(num_bits=4, group_size=64,
-                                      group_dim=2, symmetric=False))
+                                      group_dim=2, symmetric=False),
+                    args.vector_quant,
+                    VectorQuantConfig())
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
@@ -1305,6 +1418,8 @@ def add_parser_arguments(parser):
     parser.add_argument("--attn-sparsity", type=float, default=1.0)
     parser.add_argument("--compress-weight", action="store_true",
         help="Whether to compress weight.")
+    parser.add_argument("--vector-quant", action="store_true",
+        help="Whether to use vector quantization.")
     parser.add_argument("--compress-cache", action="store_true",
         help="Whether to compress cache.")
 

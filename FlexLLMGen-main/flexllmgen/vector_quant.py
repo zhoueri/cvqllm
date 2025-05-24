@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import dataclasses
 
 from typing import Optional, Union, Tuple
 
@@ -9,12 +10,57 @@ from flexllmgen.utils import np_dtype_to_torch_dtype
 
 from flexllmgen.gptq.vq_quant import kpp_parallel_sampled, mahalanobis_init, VQQuantizer, vq_quantize
 
+@dataclasses.dataclass
+class VectorQuantConfig:
+    """向量量化配置类，用于设置和存储向量量化的参数"""
+    
+    # 基本量化参数
+    wbit: float = 16                      # 量化位宽
+    vq_dim: int = 2                    # 向量维度
+    groupsize: int = 1024               # 分组大小
+    
+    # 码本结构参数
+    columns_per_group: Optional[int] = None  # 每组列数
+    codebook_bitwidth: Optional[int] = None  # 码本位宽
+    
+    # K-means算法参数
+    kmeans_init_method: str = "mahalanobis"  # K-means初始化方法: "kpp", "mahalanobis", "cdf"
+    kmeans_iters: int = 10                   # K-means迭代次数
+    assignment_chunk_size: Optional[int] = None  # 分配块大小
+    kpp_n_subsample: int = 100000            # KPP子采样数量
+    quantize_during_kmeans: bool = False     # 是否在K-means过程中量化中心点
+    
+    # 缩放参数
+    vq_scaling_blocksize: int = -1           # 向量缩放块大小，-1表示禁用
+    vq_scaling_norm: str = "max"             # 向量缩放范数类型
+    vq_scaling_n_bits: int = 4               # 向量缩放位数
+    vq_scaling_domain: str = "log"           # 向量缩放域
+    
+    # 高级选项
+    quantize_per_codebook: bool = True       # 每码本量化
+    
+    def __post_init__(self):
+        """验证配置参数的合理性"""
+        if self.wbit * self.vq_dim > 16:
+            print(f"警告: wbit({self.wbit}) * vq_dim({self.vq_dim}) = {self.wbit*self.vq_dim} > 16，"
+                  f"码本大小(2^{self.wbit*self.vq_dim})可能过大")
+            
+        if self.kmeans_init_method not in ["kpp", "mahalanobis", "cdf"]:
+            raise ValueError(f"不支持的K-means初始化方法: {self.kmeans_init_method}")
+            
+        if self.vq_scaling_norm not in ["max", "l2"]:
+            raise ValueError(f"不支持的向量缩放范数类型: {self.vq_scaling_norm}")
+            
+        if self.vq_scaling_domain not in ["log", "linear"]:
+            raise ValueError(f"不支持的向量缩放域: {self.vq_scaling_domain}")
+
 class ConfidentialTensor(TorchTensor):
     """A tensor that storing sensitive data."""
 
-    def __init__(self, shape, dtype, data, device, is_confidential=False, name=None):
+    def __init__(self, shape, dtype, data, device, is_confidential=False, name=None, is_codebook=False):
         super().__init__(shape, dtype, data, device, name=name)
         self.is_confidential = is_confidential
+        self.is_codebook = is_codebook
 
     @classmethod
     def create_from_torch(cls, data, device, is_confidential=False, name=None):
@@ -53,7 +99,7 @@ class ConfidentialTensor(TorchTensor):
         else:
             shape = self.shape
         if dst.device_type == DeviceType.VECTORQUANT:
-            ret = dst.allocate(shape, self.dtype, self.data[2])
+            ret = dst.allocate(shape, self.dtype, self.data[2], quantizer=self.data[1], is_codebook=dst.is_codebook)
             general_copy_confidential(ret, None, self, src_indices)
         else:
             ret = super().copy(dst, src_indices)
@@ -108,56 +154,44 @@ class TorchVectorQuantDevice:
         self.data_dequant_workspace = None
         self.workspace_pt = 0
 
-    def allocate(self, shape, dtype, vectorquant_config, pin_memory=None, name=None):
+    def allocate(self, shape, dtype, vectorquant_config, pin_memory=None, name=None, codebook=False, quantizer=None):
         '''Allocate a tensor in vector quant format.'''
         wbits = vectorquant_config.wbit
         vq_dim = vectorquant_config.vq_dim
-        n_centroids = 2 ** (wbits * vq_dim), "K = 2^(wbits * vq_dim)"
+        n_centroids = 2 ** (wbits * vq_dim) # "K = 2^(wbits * vq_dim)"
 
         assert len(shape) == 2, "Only 2D tensor is supported"
+        if quantizer is None:
+            quantizer = VectorQuantizer(vectorquant_config)
+            quantizer.configure(vectorquant_config.wbit) 
+        groupsize, centroids_G = quantizer.get_groupsize(shape, vectorquant_config.groupsize) # "In most case, G = shape[0]"
+        n_groups = shape[1] // groupsize # "Number of quant groups"
+        
+        if codebook:
+            centroids_shape = (n_groups, centroids_G, n_centroids, vq_dim) # "N x G x K x D"
+            quantizer.centroids_shape = centroids_shape
+            quantizer.centroids_dtype = dtype
+            centroids = self.base_device.allocate(centroids_shape, dtype,
+                pin_memory=pin_memory, name=name)
+            
+            return ConfidentialTensor(shape, np_dtype_to_torch_dtype(dtype), 
+                            (centroids, quantizer, vectorquant_config), self, is_confidential=True, name = name, is_codebook=True)
+        else:
+            idx_shape = (n_groups, shape[0], groupsize // vq_dim) # "N x G x R // N // D "
+            '''The data type of the index tensor is related to the number of codebooks'''
+            if n_centroids <= 2**8: 
+                idx_dtype = np.uint8
+            elif n_centroids <= 2**16:  
+                idx_dtype = np.uint16
+            else:  
+                idx_dtype = np.uint32
 
-        quantizer = VectorQuantizer(
-            vq_dim=vectorquant_config.vq_dim,
-            columns_per_group=vectorquant_config.columns_per_group,
-            vq_scaling_blocksize=vectorquant_config.vq_scaling_blocksize,
-            vq_scaling_norm=vectorquant_config.vq_scaling_norm,
-            vq_scaling_n_bits=vectorquant_config.vq_scaling_n_bits,
-            vq_scaling_domain=vectorquant_config.vq_scaling_domain,
-            kmeans_init_method=vectorquant_config.kmeans_init_method,
-            assignment_chunk_size=vectorquant_config.assignment_chunk_size,
-            kmeans_iters=vectorquant_config.kmeans_iters,
-            codebook_bitwidth=vectorquant_config.codebook_bitwidth,
-            quantize_per_codebook=vectorquant_config.quantize_per_codebook,
-            quantize_during_kmeans=vectorquant_config.quantize_during_kmeans,
-            n_subsample=vectorquant_config.kpp_n_subsample)
+            quantizer.idx_shape = idx_shape
+            quantizer.idx_dtype = idx_dtype
+            idx = self.base_device.allocate(idx_shape, idx_dtype, pin_memory=pin_memory, name=name) 
+            return ConfidentialTensor(shape, np_dtype_to_torch_dtype(dtype), 
+                            (idx, quantizer, vectorquant_config), self, is_confidential=False, name = name)
         
-        groupsize, centroids_G = quantizer.get_groupsize(shape, vectorquant_config.groupsize), "In most case, G = shape[0]"
-        n_groups = shape[1] // groupsize,  "Number of quant groups"
-        
-        idx_shape = (n_groups, shape[0], n_groups // vq_dim), "N x G x R // N // D "
-        '''The data type of the index tensor is related to the number of codebooks'''
-        if n_centroids <= 2**8: 
-            idx_dtype = np.uint8
-        elif n_centroids <= 2**16:  
-            idx_dtype = np.uint16
-        else:  
-            idx_dtype = np.uint32
-        idx = self.base_device.allocate(idx_shape, idx_dtype, pin_memory=pin_memory, 
-            name=name), 
-        
-        centroids_shape = (n_groups, centroids_G, n_centroids, vq_dim), "N x G x K x D"
-        centroids = self.base_device.allocate(centroids_shape, dtype,
-            pin_memory=pin_memory, name=name)
-        
-        quantizer.idx_shape = idx_shape
-        quantizer.idx_dtype = idx_dtype
-        quantizer.centroids_shape = centroids_shape
-        quantizer.centroids_dtype = dtype
-        quantizer.configure(vectorquant_config.wbit)
-        
-        return ConfidentialTensor(idx_shape, np_dtype_to_torch_dtype(idx_dtype), 
-            idx, self, is_confidential=False, name = name), ConfidentialTensor(centroids_shape, 
-            np_dtype_to_torch_dtype(dtype), centroids, self, is_confidential=True, name = name), quantizer
 
     def init_cache_one_gpu_batch(self, config, task, policy):
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
@@ -172,7 +206,7 @@ class TorchVectorQuantDevice:
             comp_config=policy.comp_cache_config, pin_memory=pin_memory)
         return k_cache, v_cache
     
-    def simple_vq_quant(self, W, idx, centroids, quantizer):
+    def simple_vq_quant(self, W, idx, centroids, quantizer, vectorquant_config):
         W1 = W.data.clone()
         assert len(W1.shape) == 2, "Only 2D tensor is supported"
         W1 = W1.float()
@@ -198,8 +232,8 @@ class TorchVectorQuantDevice:
         
         idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
         return (
-            ConfidentialTensor(idx.shape, idx.dtype, idx, self, is_confidential=False), 
-            ConfidentialTensor(centroids.shape, centroids.dtype, centroids, self, is_confidential=True)
+            ConfidentialTensor(idx.shape, idx.dtype, (idx, quantizer, vectorquant_config), self), 
+            ConfidentialTensor(centroids.shape, centroids.dtype, (centroids, quantizer, vectorquant_config), self, is_confidential=True, is_codebook=True),
         )
     
     def optimize_index_desensitization(self, idx_tensor, centroids_tensor, quantizer):
@@ -274,39 +308,33 @@ class TorchVectorQuantDevice:
         # 返回优化后的张量
         return idx_tensor_new, centroids_tensor_new
     
+    def dequantize(self, idx_tensor, centroids_tensor):
+        idx, quantizer, vectorquant_config = idx_tensor.data
+        centroids = centroids_tensor.data[0]
+        w = quantizer.dequantize(idx, centroids)
+        return w
+    
 
 
 class VectorQuantizer(VQQuantizer):
     def __init__(
         self,
-        vq_dim=2,
-        n_subsample=100000,
-        columns_per_group=None,
-        kmeans_init_method="mahalanobis",
-        assignment_chunk_size=None,
-        kmeans_iters=10,
-        codebook_bitwidth=None,
-        quantize_per_codebook=True,
-        vq_scaling_blocksize=-1,
-        vq_scaling_norm="max",
-        vq_scaling_n_bits=4,
-        vq_scaling_domain="log",
-        quantize_during_kmeans=False
+        vectorquant_config,
     ):
         super().__init__(
-            vq_dim=vq_dim,
-            n_subsample=n_subsample,
-            columns_per_group=columns_per_group,
-            kmeans_init_method=kmeans_init_method,
-            assignment_chunk_size=assignment_chunk_size,
-            kmeans_iters=kmeans_iters,
-            codebook_bitwidth=codebook_bitwidth,
-            quantize_per_codebook=quantize_per_codebook,
-            vq_scaling_blocksize=vq_scaling_blocksize,
-            vq_scaling_norm=vq_scaling_norm,
-            vq_scaling_n_bits=vq_scaling_n_bits,
-            vq_scaling_domain=vq_scaling_domain,
-            quantize_during_kmeans=quantize_during_kmeans
+            vq_dim=vectorquant_config.vq_dim,
+            columns_per_group=vectorquant_config.columns_per_group,
+            vq_scaling_blocksize=vectorquant_config.vq_scaling_blocksize,
+            vq_scaling_norm=vectorquant_config.vq_scaling_norm,
+            vq_scaling_n_bits=vectorquant_config.vq_scaling_n_bits,
+            vq_scaling_domain=vectorquant_config.vq_scaling_domain,
+            kmeans_init_method=vectorquant_config.kmeans_init_method,
+            assignment_chunk_size=vectorquant_config.assignment_chunk_size,
+            kmeans_iters=vectorquant_config.kmeans_iters,
+            codebook_bitwidth=vectorquant_config.codebook_bitwidth,
+            quantize_per_codebook=vectorquant_config.quantize_per_codebook,
+            quantize_during_kmeans=vectorquant_config.quantize_during_kmeans,
+            n_subsample=vectorquant_config.kpp_n_subsample
         )
     
     def get_groupsize(self, X, groupsize):
@@ -359,8 +387,9 @@ class VectorQuantizer(VQQuantizer):
                     index = idx[n, r, c].item()
                     vec = centroids[n, 0, index, :]
                     output[n, r, c*self.vq_dim:(c+1)*self.vq_dim] = vec
-    
-        return output
+
+        original_shape = (rows, batch_size, cols * self.vq_dim)
+        return output.permute(1, 0, 2).reshape(original_shape)
 
 
 

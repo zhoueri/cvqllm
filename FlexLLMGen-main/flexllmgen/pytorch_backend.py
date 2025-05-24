@@ -18,15 +18,19 @@ from flexllmgen.utils import (GB, T, cpu_mem_stats, vector_gather,
     torch_dtype_to_num_bytes)
 
 general_copy_compressed = TorchCompressedDevice = None
+general_copy_confidential = TorchVectorQuantDevice = None
 global_cpu_device = None
 global_disk_device = None
 
 
 def fix_recursive_import():
-    global general_copy_compressed, TorchCompressedDevice, global_cpu_device
+    global general_copy_compressed, TorchCompressedDevice, global_cpu_device, general_copy_confidential, TorchVectorQuantDevice
     from flexllmgen import compression
     general_copy_compressed = compression.general_copy_compressed
     TorchCompressedDevice = compression.TorchCompressedDevice
+    from flexllmgen import vector_quant
+    general_copy_confidential = vector_quant.general_copy_confidential
+    TorchVectorQuantDevice = vector_quant.TorchVectorQuantDevice
 
 
 class DeviceType(Enum):
@@ -170,7 +174,7 @@ class TorchDevice:
         self.dev = torch.device(name)
         self.device_type = DeviceType.convert(self.dev.type)
         self.compressed_device = TorchCompressedDevice(self)
-
+        self.vector_quant_device = TorchVectorQuantDevice(self)
         self.links = {}
 
         self.attention_compute_workspace = None
@@ -239,11 +243,18 @@ class TorchDevice:
         if donate[0]: attention_mask.delete()
         return TorchTensor.create_from_torch(data, self)
 
-    def opt_input_embed(self, inputs, attention_mask, w_token, w_pos, pad_token_id, donate):
+    def opt_input_embed(self, inputs, attention_mask, weight, codebook, idx_position, pad_token_id, donate):
         # decompress weights
-        if w_token.device.device_type == DeviceType.COMPRESSED:
-            w_token = w_token.device.decompress(w_token)
-            w_pos = w_pos.device.decompress(w_pos)
+        for i in range(len(weight)):
+            if weight[i].device.device_type == DeviceType.COMPRESSED:
+                weight[i] = weight[i].device.decompress(weight[i])
+            elif weight[i].device.device_type == DeviceType.VECTORQUANT:
+                weight[i] = weight[i].device.dequantize(weight[i], codebook[idx_position[i]])
+        # if w_token.device.device_type == DeviceType.COMPRESSED:
+        #     w_token = w_token.device.decompress(w_token)
+        #     w_pos = w_pos.device.decompress(w_pos)
+
+        w_token, w_pos = weight
 
         token_ids = inputs.data
         mask = attention_mask.data
@@ -265,11 +276,18 @@ class TorchDevice:
         data = token_embed + pos_embed
         return TorchTensor.create_from_torch(data, self)
 
-    def opt_output_embed(self, inputs, w_ln, b_ln, w_token, donate,
+    def opt_output_embed(self, inputs, weight, codebook, idx_position, w_token, donate,
                          do_sample, temperature):
         # decompress weights
-        if w_token.device.device_type == DeviceType.COMPRESSED:
-            w_token = w_token.device.decompress(w_token)
+        # if w_token.device.device_type == DeviceType.COMPRESSED:
+        #     w_token = w_token.device.decompress(w_token)
+        for i in range(len(weight)):
+            if weight[i].device.device_type == DeviceType.COMPRESSED:
+                weight[i] = weight[i].device.decompress(weight[i])
+            elif weight[i].device.device_type == DeviceType.VECTORQUANT:
+                weight[i] = weight[i].device.dequantize(weight[i], codebook[idx_position[i]])
+
+        w_ln, b_ln, w_token = weight
 
         b, s, h = inputs.shape
 
@@ -298,15 +316,22 @@ class TorchDevice:
         v_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         return k_cache, v_cache
 
-    def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
-            w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config):
+    def mha(self, inputs, attention_mask, weight, codebook, idx_position, 
+            n_head, donate, compress_cache, comp_config):
         """Multi-head attention (prefill phase)."""
         # decompress weights
-        if w_q.device.device_type == DeviceType.COMPRESSED:
-            w_q = w_q.device.decompress(w_q)
-            w_k = w_k.device.decompress(w_k)
-            w_v = w_v.device.decompress(w_v)
-            w_out = w_out.device.decompress(w_out)
+        # if w_q.device.device_type == DeviceType.COMPRESSED:
+        #     w_q = w_q.device.decompress(w_q)
+        #     w_k = w_k.device.decompress(w_k)
+        #     w_v = w_v.device.decompress(w_v)
+        #     w_out = w_out.device.decompress(w_out)
+        for i in range(len(weight)):
+            if weight[i].device.device_type == DeviceType.COMPRESSED:
+                weight[i] = weight[i].device.decompress(weight[i])
+            elif weight[i].device.device_type == DeviceType.VECTORQUANT:
+                weight[i] = weight[i].device.dequantize(weight[i], codebook[idx_position[i]])
+
+        w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight
 
         b, s, h = inputs.shape
         head_dim = h // n_head
@@ -367,16 +392,22 @@ class TorchDevice:
 
         return TorchTensor.create_from_torch(value, self), k, v
 
-    def mha_gen(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
-                w_out, b_out, w_ln, b_ln, n_head, k_cache, v_cache, donate,
-                attn_sparsity, compress_cache, comp_config):
+    def mha_gen(self, inputs, attention_mask, weight, codebook, idx_position, 
+            n_head, k_cache, v_cache, donate, attn_sparsity, compress_cache, comp_config):
         """Multi-head attention (decoding phase)."""
         # decompress weights
-        if w_q.device.device_type == DeviceType.COMPRESSED:
-            w_q = w_q.device.decompress(w_q)
-            w_k = w_k.device.decompress(w_k)
-            w_v = w_v.device.decompress(w_v)
-            w_out = w_out.device.decompress(w_out)
+        # if w_q.device.device_type == DeviceType.COMPRESSED:
+        #     w_q = w_q.device.decompress(w_q)
+        #     w_k = w_k.device.decompress(w_k)
+        #     w_v = w_v.device.decompress(w_v)
+        #     w_out = w_out.device.decompress(w_out)
+        for i in range(len(weight)):
+            if weight[i].device.device_type == DeviceType.COMPRESSED:
+                weight[i] = weight[i].device.decompress(weight[i])
+            elif weight[i].device.device_type == DeviceType.VECTORQUANT:
+                weight[i] = weight[i].device.dequantize(weight[i], codebook[idx_position[i]])
+
+        w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight
 
         b, tgt_s, h = inputs.shape
         src_s = attention_mask.shape[1]
@@ -569,11 +600,18 @@ class TorchDevice:
         value = torch.cat([value_gpu, value_cpu.cuda().half()], dim=0)
         return value
 
-    def mlp(self, inputs, wi, bi, wo, bo, w_ln, b_ln, donate):
+    def mlp(self, inputs, weight, codebook, idx_position, donate):
         # decompress weights
-        if wi.device.device_type == DeviceType.COMPRESSED:
-            wi = wi.device.decompress(wi)
-            wo = wo.device.decompress(wo)
+        # if wi.device.device_type == DeviceType.COMPRESSED:
+        #     wi = wi.device.decompress(wi)
+        #     wo = wo.device.decompress(wo)
+        for i in range(len(weight)):
+            if weight[i].device.device_type == DeviceType.COMPRESSED:
+                weight[i] = weight[i].device.decompress(weight[i])
+            elif weight[i].device.device_type == DeviceType.VECTORQUANT:
+                weight[i] = weight[i].device.dequantize(weight[i], codebook[idx_position[i]])
+        
+        wi, bi, wo, bo, w_ln, b_ln = weight
 
         b, s, h = inputs.shape
 
