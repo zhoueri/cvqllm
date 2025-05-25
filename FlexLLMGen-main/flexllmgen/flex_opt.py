@@ -24,7 +24,7 @@ from flexllmgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
     torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
     read_benchmark_log)
-from flexllmgen.vector_quant import VectorQuantConfig
+from flexllmgen.vector_quant import VectorQuantConfig, print_memory_usage
 
 fix_recursive_import()
 
@@ -94,6 +94,7 @@ def get_choice(cur_percent, percents, choices):
 
 
 def init_weight_list(weight_specs, policy, env):
+    print_memory_usage("初始化权重前")
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
     dev_choices = [env.disk, env.cpu, env.gpu]
 
@@ -129,12 +130,17 @@ def init_weight_list(weight_specs, policy, env):
             ret.append(weight)
             idx_position.append(-1)
         elif vector_quant:
+            print_memory_usage("准备分配vector_quant权重前")
             weight = home.vector_quant_device.allocate(
                 shape, dtype, policy.vector_quant_config, pin_memory=pin_memory)
+            print_memory_usage("分配权重后,准备分配码本前")
             codebook = home.vector_quant_device.allocate(shape, dtype, policy.vector_quant_config, pin_memory=pin_memory, codebook=True, quantizer=weight.data[1])
-            
+            print_memory_usage("码本分配后")
+
             if DUMMY_WEIGHT not in filename:
+                print_memory_usage(f"加载权重前 - {filename}")
                 weight.load_from_np_file(weight_specs[i][2], codebook=codebook)
+                print_memory_usage(f"加载权重后 - {filename}")
             else:
                 weight.load_from_np(np.ones(weight.shape, torch_dtype_to_np_dtype[weight.dtype]), codebook=codebook)
 
