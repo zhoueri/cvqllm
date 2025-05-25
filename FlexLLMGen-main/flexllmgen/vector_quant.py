@@ -184,7 +184,7 @@ class TorchVectorQuantDevice:
             elif n_centroids <= 2**16:  
                 idx_dtype = np.uint16
             else:  
-                idx_dtype = np.uint32
+                idx_dtype = np.int64
 
             quantizer.idx_shape = idx_shape
             quantizer.idx_dtype = idx_dtype

@@ -1318,7 +1318,7 @@ def run_flexllmgen(args):
                     CompressionConfig(num_bits=4, group_size=64,
                                       group_dim=2, symmetric=False),
                     args.vector_quant,
-                    VectorQuantConfig())
+                    VectorQuantConfig(wbit=args.wbit))
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
@@ -1430,6 +1430,13 @@ def add_parser_arguments(parser):
 
     parser.add_argument("--overlap", type=str2bool, nargs='?',
         const=True, default=True)
+    
+    parser.add_argument(
+        "--wbits",
+        type=float,
+        default=16,
+        help="#bits to use for quantization; use 16 for evaluating base model.",
+    )
 
 
 if __name__ == "__main__":
