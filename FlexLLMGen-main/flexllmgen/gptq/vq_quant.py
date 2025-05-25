@@ -277,6 +277,7 @@ class VQQuantizer(nn.Module):
         self.n_centroids = int(2**self.wbits)
 
     def find_params(self, X: torch.Tensor, weight=True, H_inv_diag=None):
+        from flexllmgen.vector_quant import print_memory_usage
         assert weight
         assert len(X.shape) == 2
 
@@ -286,6 +287,7 @@ class VQQuantizer(nn.Module):
             if self.rows_per_group > 1:
                 H_inv_diag = H_inv_diag.tile(1, self.rows_per_group, 1)
 
+        print_memory_usage(f"初始化码本 - 方法: {self.kmeans_init_method}")
         if self.kmeans_init_method == "cdf":
             assert self.vq_dim == 1
             X, _ = torch.sort(X, 1)
@@ -298,6 +300,7 @@ class VQQuantizer(nn.Module):
         else:
             raise ValueError(f"Unkown k-means init method: {self.kmeans_init_method}")
 
+        print_memory_usage(f"码本初始化后形状: {centroids.shape}")
         # At this point, centroids should be shape G x K x D
         extra_args = {}
         if self.quantize_during_kmeans and self.codebook_bitwidth is not None:
@@ -305,6 +308,7 @@ class VQQuantizer(nn.Module):
                 codebook_bitwidth=self.codebook_bitwidth, per_codebook=self.quantize_per_codebook
             )
 
+        print_memory_usage(f"K-means开始 - 迭代次数: {self.kmeans_iters}")
         kmeans_vq(
             X,
             centroids,
@@ -315,11 +319,14 @@ class VQQuantizer(nn.Module):
         )
 
         if self.codebook_bitwidth is not None and not self.quantize_during_kmeans:
+            print_memory_usage("码本量化开始")
             quantize_centroids(
                 centroids, self.codebook_bitwidth, per_codebook=self.quantize_per_codebook
             )
+        print_memory_usage("码本量化完成")
 
-        self.all_centroids.append(centroids)
+        # self.all_centroids.append(centroids)
+        return centroids
 
     def blockwise_normalize_data(
         self,
