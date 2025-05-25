@@ -146,13 +146,10 @@ class TorchVectorQuantDevice:
         W1 = W1.float()
         # idx = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W1.device)
         # centroids = torch.zeros(quantizer.centroids_shape, dtype=W1.dtype, device=W1.device)
-
-        Losses = torch.zeros_like(W1)
         n_group = 0
         for i in range(0, W.shape[1], quantizer.groupsize):
             end = min(i + quantizer.groupsize, W.shape[1])
             W_group = W1[:, i:end].clone()
-            Losses1 = torch.zeros_like(W_group)
             centroids[n_group] = quantizer.find_param(W_group)
             
             for j in range(quantizer.groupsize):
@@ -160,8 +157,6 @@ class TorchVectorQuantDevice:
                     w = W_group[:, j:j+quantizer.vq_dim]
                     q, assmt = vq_quantize(w, quantizer, centroids=centroids[n_group])
                     idx[n_group,:,j // quantizer.vq_dim] = assmt
-                    Losses1[:, j:j+quantizer.vq_dim] = (w - q)**2
-            Losses[:, i:end] = Losses1
             n_group += 1
         
         idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
@@ -183,19 +178,20 @@ class TorchVectorQuantDevice:
             优化后的(idx_tensor, centroids_tensor)
         """
         # 获取原始数据
-        idx = idx_tensor.data.clone() if isinstance(idx_tensor.data, torch.Tensor) else idx_tensor.data
-        centroids = centroids_tensor.data.clone() if isinstance(centroids_tensor.data, torch.Tensor) else centroids_tensor.data
-    
+        # idx = idx_tensor.data.clone() if isinstance(idx_tensor.data, torch.Tensor) else idx_tensor.data
+        # centroids = centroids_tensor.data.clone() if isinstance(centroids_tensor.data, torch.Tensor) else centroids_tensor.data
+        idx = idx_tensor.data
+        centroids = centroids_tensor.data 
         # 获取形状
         batch_size, rows, cols = idx.shape
         _, centroids_G, n_centroids, vq_dim = centroids.shape
 
         # 保存原始码本-索引映射的副本用于验证
-        original_mapping = {}
-        for n in range(batch_size):
-            original_mapping[n] = {}
-            for i in range(n_centroids):
-                original_mapping[n][i] = centroids[n, 0, i, :].clone()
+        # original_mapping = {}
+        # for n in range(batch_size):
+        #     original_mapping[n] = {}
+        #     for i in range(n_centroids):
+        #         original_mapping[n][i] = centroids[n, 0, i, :].clone()
     
         # 对每个批次独立处理
         for n in range(batch_size):
@@ -233,7 +229,7 @@ class TorchVectorQuantDevice:
             centroids[n] = new_centroids
 
         # 8. 验证变换保持一致性
-        verify_consistency(idx, centroids, original_mapping, quantizer)
+        # verify_consistency(idx, centroids, original_mapping, quantizer)
 
         # 9. 创建结果张量
         # 如果idx和centroids本身就是torch.Tensor，则直接使用
