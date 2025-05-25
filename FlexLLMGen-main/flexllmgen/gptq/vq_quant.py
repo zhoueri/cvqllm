@@ -7,7 +7,7 @@ from torch import nn
 import time
 
 from .uniform_quantizers import SymmetricUniformQuantizer
-from flexllmgen.vector_quant import print_memory_usage
+from flexllmgen.utils.memory_monitor import print_memory_usage
 
 def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
     """
