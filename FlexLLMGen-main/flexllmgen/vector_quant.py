@@ -149,7 +149,7 @@ class TorchVectorQuantDevice:
     def __init__(self, base_device):
         '''Manager tensor in a vector quant format.'''
         self.name = "vector_quant"
-        self.device_type = DeviceType.VECTOR_QUANT
+        self.device_type = DeviceType.VECTORQUANT
         self.base_device = base_device
         self.data_dequant_workspace = None
         self.workspace_pt = 0
@@ -337,38 +337,38 @@ class VectorQuantizer(VQQuantizer):
             n_subsample=vectorquant_config.kpp_n_subsample
         )
     
-    def get_groupsize(self, X, groupsize):
+    def get_groupsize(self, shape, groupsize):
         if self.columns_per_group is not None:
             if groupsize < self.columns_per_group:
                 assert self.columns_per_group % groupsize == 0
                 self.columns_per_group = groupsize
 
             assert groupsize % self.columns_per_group == 0
-            assert X.shape[1] % self.columns_per_group == 0
+            assert shape[1] % self.columns_per_group == 0
 
             self.rows_per_group = groupsize // self.columns_per_group
-            assert X.shape[0] % self.rows_per_group == 0
+            assert shape[0] % self.rows_per_group == 0
 
             self.groups_per_column = X.shape[0] // self.rows_per_group
             self.groupsize = self.columns_per_group
             return self.columns_per_group, self.groups_per_column
 
-        if groupsize < X.shape[1]:
-            assert X.shape[1] % groupsize == 0
-            self.groups_per_column = X.shape[0]
+        if groupsize < shape[1]:
+            assert shape[1] % groupsize == 0
+            self.groups_per_column = shape[0]
             self.groupsize = groupsize
             return groupsize, self.groups_per_column
 
-        if groupsize % X.shape[1] != 0:
+        if groupsize % shape[1] != 0:
             print(
-                f"Requested groupsize {groupsize} doesn't fit tensor shape[0] {X.shape[0]}. "
-                f"Upscaling to {int(np.ceil(groupsize / X.shape[0]) * X.shape[0])}"
+                f"Requested groupsize {groupsize} doesn't fit tensor shape[0] {shape[0]}. "
+                f"Upscaling to {int(np.ceil(groupsize / shape[0]) * shape[0])}"
             )
 
-        rows_per_group = int(np.ceil(groupsize / X.shape[1]))
-        self.groups_per_column = X.shape[0] // rows_per_group
-        self.groupsize = X.shape[1]
-        return X.shape[1], self.groups_per_column
+        rows_per_group = int(np.ceil(groupsize / shape[1]))
+        self.groups_per_column = shape[0] // rows_per_group
+        self.groupsize = shape[1]
+        return shape[1], self.groups_per_column
     
     def find_param(self, w):
         assert len(w.shape) == 2, "Only 2D tensor is supported"

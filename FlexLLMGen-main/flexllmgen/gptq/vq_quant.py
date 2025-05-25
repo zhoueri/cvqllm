@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import time
 
-from uniform_quantizers import SymmetricUniformQuantizer
+from .uniform_quantizers import SymmetricUniformQuantizer
 
 
 def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
