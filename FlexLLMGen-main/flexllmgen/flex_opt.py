@@ -134,11 +134,9 @@ def init_weight_list(weight_specs, policy, env):
             codebook = home.vector_quant_device.allocate(shape, dtype, policy.vector_quant_config, pin_memory=pin_memory, codebook=True, quantizer=weight.data[1])
             
             if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
+                weight.load_from_np_file(weight_specs[i][2], codebook=codebook)
             else:
-                for i in range(2):
-                    x = weight.data[i]
-                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
+                weight.load_from_np(np.ones(weight.shape, torch_dtype_to_np_dtype[weight.dtype]), codebook=codebook)
 
             ret.append(weight)
             ret_codebook.append(codebook)
