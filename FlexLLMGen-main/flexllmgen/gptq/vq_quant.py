@@ -7,13 +7,15 @@ from torch import nn
 import time
 
 from .uniform_quantizers import SymmetricUniformQuantizer
-
+from flexllmgen.vector_quant import print_memory_usage
 
 def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
     """
     X: G x N x D
     centroids: G x K x D
     """
+    print_memory_usage("get_assignments开始")
+
     if H_inv_diag is None:
         H_inv_diag = torch.ones(X.shape[-1]).to(X.device)
     elif H_inv_diag.ndim > 2:  # should then be 1 x N x D
@@ -28,11 +30,13 @@ def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
         X_chunks = [X]
         H_inv_diag_chunks = [H_inv_diag]
     else:
+        print_memory_usage(f"分块处理 - 块大小: {chunk_size}")
         X_chunks = torch.split(X, chunk_size, dim=1)
         if H_inv_diag.ndim > 1:
             H_inv_diag_chunks = torch.split(H_inv_diag, chunk_size, dim=1)
         else:
             H_inv_diag_chunks = [H_inv_diag] * len(X_chunks)
+    print_memory_usage("准备计算距离")
 
     centroids = centroids.unsqueeze(1)  # G x 1 x K x D
 
@@ -44,6 +48,8 @@ def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
 
         assignments.append(dist.argmin(-1))  # G x N'
     assignments = torch.concat(assignments, dim=1)
+    print_memory_usage("get_assignments完成")
+
 
     return assignments  # G x N
 
@@ -75,6 +81,8 @@ def kmeans_m_step_3(
     X: torch.Tensor,
     H_inv_diag=None,
 ):
+    print_memory_usage("kmeans_m_step_3开始")
+
     """
     X: G x N x D
     centroids: G x K x D
@@ -83,11 +91,18 @@ def kmeans_m_step_3(
     """
     crange = torch.arange(0, n_centroids).to(centroids.device)
 
+    print_memory_usage("计算扩展分配矩阵前")
+
     # G x N x 1 == 1 x 1 x K --> G x N x K
     assignments_expanded = (assignments.unsqueeze(-1) == crange.view(1, 1, -1)).to(X.dtype)
+    print_memory_usage("计算扩展分配矩阵后")
 
     if H_inv_diag is None:
+        print_memory_usage("计算正则化前")
+
         norm = 1.0 / torch.clip(assignments_expanded.sum(1), min=1)  # G x K
+        print_memory_usage("计算新码本前 (einsum)")
+
         clusters_for_centroid = torch.einsum("gnd,gnk,gk->gkd", X, assignments_expanded, norm)
     else:
         norm = 1.0 / torch.clip(
@@ -96,6 +111,7 @@ def kmeans_m_step_3(
         clusters_for_centroid = torch.einsum(
             "gnd,nd,gnk,gkd->gkd", X, H_inv_diag[0], assignments_expanded, norm
         )
+    print_memory_usage("更新码本前")
 
     centroids.copy_(clusters_for_centroid)
 
@@ -109,19 +125,26 @@ def kmeans_vq(
     codebook_bitwidth=None,
     per_codebook=False,
 ):
+    print_memory_usage("kmeans_vq开始")
     n_centroids = centroids.shape[1]
     for iter in range(iters):
+        print_memory_usage(f"K-means迭代 {iter+1}/{iters}")
         # E-step
         assignments = get_assignments(
             X, centroids, chunk_size=assignment_chunk_size, H_inv_diag=H_inv_diag
         )
+        print_memory_usage("E-step完成")
 
         # M-step: gather all values for each centroid and compute means
         # Centroids is shape G x D x K; assignments is shape G x N
         kmeans_m_step_3(centroids, n_centroids, assignments, X, H_inv_diag=H_inv_diag)
+        print_memory_usage("M-step完成")
 
         if codebook_bitwidth is not None:
+            print_memory_usage("码本量化开始")
             quantize_centroids(centroids, codebook_bitwidth, per_codebook=per_codebook)
+            print_memory_usage("码本量化完成")
+
 
 
 def kpp_parallel_sampled(data: torch.Tensor, k: int):
@@ -277,7 +300,7 @@ class VQQuantizer(nn.Module):
         self.n_centroids = int(2**self.wbits)
 
     def find_params(self, X: torch.Tensor, weight=True, H_inv_diag=None):
-        from flexllmgen.vector_quant import print_memory_usage
+
         assert weight
         assert len(X.shape) == 2
 
