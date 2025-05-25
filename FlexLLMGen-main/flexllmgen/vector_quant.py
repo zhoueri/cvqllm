@@ -166,9 +166,10 @@ class TorchVectorQuantDevice:
             quantizer.configure(vectorquant_config.wbit) 
         groupsize, centroids_G = quantizer.get_groupsize(shape, vectorquant_config.groupsize) # "In most case, G = shape[0]"
         n_groups = shape[1] // groupsize # "Number of quant groups"
+        assert shape[1] % groupsize == 0, f"shape[1] {shape[1]} is not divisible by groupsize {groupsize}"
         
         if codebook:
-            centroids_shape = (n_groups, centroids_G, n_centroids, vq_dim) # "N x G x K x D"
+            centroids_shape = (int(n_groups), int(centroids_G), int(n_centroids), int(vq_dim)) # "N x G x K x D"
             quantizer.centroids_shape = centroids_shape
             quantizer.centroids_dtype = dtype
             centroids = self.base_device.allocate(centroids_shape, dtype,
@@ -177,7 +178,7 @@ class TorchVectorQuantDevice:
             return ConfidentialTensor(shape, np_dtype_to_torch_dtype[dtype], 
                             (centroids, quantizer, vectorquant_config), self, is_confidential=True, name = name, is_codebook=True)
         else:
-            idx_shape = (n_groups, shape[0], groupsize // vq_dim) # "N x G x R // N // D "
+            idx_shape = (int(n_groups), int(shape[0]), int(groupsize // vq_dim)) # "N x G x R // N // D "
             '''The data type of the index tensor is related to the number of codebooks'''
             if n_centroids <= 2**8: 
                 idx_dtype = np.uint8
@@ -349,7 +350,7 @@ class VectorQuantizer(VQQuantizer):
             self.rows_per_group = groupsize // self.columns_per_group
             assert shape[0] % self.rows_per_group == 0
 
-            self.groups_per_column = X.shape[0] // self.rows_per_group
+            self.groups_per_column = shape[0] // self.rows_per_group
             self.groupsize = self.columns_per_group
             return self.columns_per_group, self.groups_per_column
 
