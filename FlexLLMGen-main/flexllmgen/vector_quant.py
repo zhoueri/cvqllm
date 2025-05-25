@@ -189,11 +189,13 @@ class TorchVectorQuantDevice:
         for i in range(0, W.shape[1], quantizer.groupsize):
             end = min(i + quantizer.groupsize, W.shape[1])
             W_group = W1[:, i:end].clone()
+            print_memory_usage(f"码本: {n_group},初始化前")
             centroids[n_group] = quantizer.find_param(W_group)
-            
+            print_memory_usage(f"码本: {n_group},初始化后")
             for j in range(quantizer.groupsize):
                 if j % quantizer.vq_dim == 0:
                     w = W_group[:, j:j+quantizer.vq_dim]
+                    print_memory_usage(f"量化组:{j}")
                     q, assmt = vq_quantize(w, quantizer, centroids=centroids[n_group])
                     idx[n_group,:,j // quantizer.vq_dim] = assmt
             n_group += 1
