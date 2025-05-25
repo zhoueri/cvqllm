@@ -174,7 +174,7 @@ class TorchVectorQuantDevice:
             centroids = self.base_device.allocate(centroids_shape, dtype,
                 pin_memory=pin_memory, name=name)
             
-            return ConfidentialTensor(shape, np_dtype_to_torch_dtype(dtype), 
+            return ConfidentialTensor(shape, np_dtype_to_torch_dtype[dtype], 
                             (centroids, quantizer, vectorquant_config), self, is_confidential=True, name = name, is_codebook=True)
         else:
             idx_shape = (n_groups, shape[0], groupsize // vq_dim) # "N x G x R // N // D "
@@ -189,7 +189,7 @@ class TorchVectorQuantDevice:
             quantizer.idx_shape = idx_shape
             quantizer.idx_dtype = idx_dtype
             idx = self.base_device.allocate(idx_shape, idx_dtype, pin_memory=pin_memory, name=name) 
-            return ConfidentialTensor(shape, np_dtype_to_torch_dtype(dtype), 
+            return ConfidentialTensor(shape, np_dtype_to_torch_dtype[dtype], 
                             (idx, quantizer, vectorquant_config), self, is_confidential=False, name = name)
         
 
