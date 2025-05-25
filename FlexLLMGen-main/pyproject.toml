@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flexllmgen"
-version = "0.1.7"
-description = "Running large language models like OPT-175B/GPT-3 on a single GPU. Focusing on high-throughput large-batch generation."
+name = "cvq-flexllmgen"
+version = "0.1.0"
+description = "CVQ优化版FlexLLMGen：基于FlexLLMGen的修改版本，添加了自适应量化功能，提高大型语言模型在单GPU上的性能。"
 readme = "README.md"
 requires-python = ">=3.7"
 classifiers = [
@@ -18,8 +18,8 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/FMInference/FlexLLMGen"
-"Bug Tracker" = "https://github.com/FMInference/FlexLLMGen/issues"
+"Homepage" = "https://github.com/zhoueri/cvqllm"
+"Bug Tracker" = "https://github.com/zhoueri/cvqllm/issues"
 
 [tool.setuptools.packages.find]
 exclude = ["benchmark*", "dist*", "playground*", "scripts*"]
