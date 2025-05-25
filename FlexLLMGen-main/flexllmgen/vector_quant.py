@@ -313,7 +313,7 @@ class VectorQuantizer(VQQuantizer):
     
     def find_param(self, w):
         assert len(w.shape) == 2, "Only 2D tensor is supported"
-        super().find_param(w)
+        super().find_params(w)
         return self.all_centroids[-1]
 
     def dequantize(self, idx, centroids):
