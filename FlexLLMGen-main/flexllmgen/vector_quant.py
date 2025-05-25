@@ -70,9 +70,11 @@ def general_copy_confidential(dst: ConfidentialTensor, dst_indices: Tuple[slice]
         general_copy(dst, dst_indices, src, src_indices)
 
 def set_secure_flag():
+    print("Secure flag set")
     pass
 
 def clear_secure_flag():
+    print("Secure flag cleared")
     pass
 
 class TorchVectorQuantDevice:
@@ -246,6 +248,13 @@ class TorchVectorQuantDevice:
         w = quantizer.dequantize(idx, centroids)
         return w
     
+    def create_tmp_tensor(self, X, quantizer):
+        """创建临时张量"""
+        idx_shape = quantizer.idx_shape
+        centroids_shape = quantizer.centroids_shape
+        idx = torch.zeros(idx_shape, dtype=quantizer.idx_dtype, device=X.device)
+        centroids = torch.zeros(centroids_shape, dtype=quantizer.centroids_dtype, device=X.device)
+        return idx, centroids
 
 
 class VectorQuantizer(VQQuantizer):
