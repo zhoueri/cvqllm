@@ -163,6 +163,74 @@ class TorchTensor:
                 f"device={self.device.name if self.device else None})")
 
 
+class ConfidentialTensor(TorchTensor):
+    """A tensor that storing sensitive data."""
+
+    def __init__(self, shape, dtype, data, device, is_confidential=False, name=None, is_codebook=False):
+        super().__init__(shape, dtype, data, device, name=name)
+        self.is_confidential = is_confidential
+        self.is_codebook = is_codebook
+
+    @classmethod
+    def create_from_torch(cls, data, device, is_confidential=False, name=None):
+        """从torch张量创建SecureTorchTensor"""
+        return cls(data.shape, data.dtype, data, device, is_confidential=is_confidential, name=name)
+    
+    @classmethod
+    def from_torch_tensor(cls, tensor, is_confidential=False):
+        """从现有的TorchTensor创建SecureTorchTensor"""
+        return cls(tensor.shape, tensor.dtype, tensor.data, tensor.device, 
+                  is_confidential=is_confidential, name=tensor.name)
+    
+    def load_from_np(self, np_array, codebook=None):
+        if self.device.device_type == DeviceType.VECTORQUANT:
+            assert codebook is not None, "codebook must be provided for vector quantization"
+            assert isinstance(codebook, ConfidentialTensor), "codebook must be a ConfidentialTensor object"
+            tmp = torch.from_numpy(np_array)
+            tmp, codebook_tensor = global_cpu_device.vector_quant_device.quantize(tmp)
+            general_copy_confidential(self, None, tmp, None)
+            general_copy_confidential(codebook, None, codebook_tensor, None)
+        else:
+            super().load_from_np(np_array)
+        
+    def load_from_np_file(self, filename, codebook=None):
+        if self.device.device_type == DeviceType.VECTORQUANT:
+            return self.load_from_np(np.load(filename), codebook)
+        else:
+            super().load_from_np_file(filename)
+            return None
+        
+    def copy(self, dst, src_indices=None):
+        if src_indices:
+            assert all(x.step is None for x in src_indices)
+            shape = tuple(x.stop - x.start for x in src_indices
+                ) + self.shape[len(src_indices):]
+        else:
+            shape = self.shape
+        if dst.device_type == DeviceType.VECTORQUANT:
+            ret = dst.allocate(shape, self.dtype, self.data[2], quantizer=self.data[1], is_codebook=dst.is_codebook)
+            general_copy_confidential(ret, None, self, src_indices)
+        else:
+            ret = super().copy(dst, src_indices)
+        return ret
+    
+    def smart_copy(self, dst, src_indices=None):
+        if self.device == dst:
+            return self, False
+        return self.copy(dst, src_indices=src_indices), True
+    
+    def move(self, dst):
+        if self.device == dst:
+            return self
+        ret = self.copy(dst)
+        self.delete()
+        return ret
+    
+    def __str__(self):
+        return (f"ConfidentialTensor(shape={self.shape}, dtype={str(self.dtype)}, "
+                f"device={self.device.name if self.device else None}, "
+                f"is_confidential={self.is_confidential})")
+
 class TorchDevice:
     """Wrap tensor and computation APIs of a single CPU or GPU."""
 
