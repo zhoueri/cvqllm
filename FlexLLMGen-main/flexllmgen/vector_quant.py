@@ -54,7 +54,7 @@ class VectorQuantConfig:
     # 基本量化参数
     wbit: float = 16                      # 量化位宽
     vq_dim: int = 2                    # 向量维度
-    groupsize: int = 512               # 分组大小
+    groupsize: int = 1024               # 分组大小
     
     # 码本结构参数
     columns_per_group: Optional[int] = None  # 每组列数
