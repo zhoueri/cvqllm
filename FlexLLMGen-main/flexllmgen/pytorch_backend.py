@@ -191,7 +191,7 @@ class ConfidentialTensor(TorchTensor):
             tmp = torch.from_numpy(np_array)
             idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.create_tmp_tensor(tmp, codebook.data[1])
             idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.simple_vq_quant(tmp, idx_tmp, codebook_tmp, codebook.data[1], codebook.data[2])
-            general_copy_confidential(self, None, tmp, None)
+            general_copy_confidential(self, None, idx_tmp, None)
             general_copy_confidential(codebook, None, codebook_tmp, None)
             del idx_tmp, codebook_tmp
         else:
