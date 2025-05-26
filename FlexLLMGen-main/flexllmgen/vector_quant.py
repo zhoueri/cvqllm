@@ -157,7 +157,7 @@ class TorchVectorQuantDevice:
                 if j % quantizer.vq_dim == 0:
                     w = W_group[:, j:j+quantizer.vq_dim]
                     q, assmt = vq_quantize(w, quantizer, centroids=centroids[n_group])
-                    idx[n_group,:,j // quantizer.vq_dim] = assmt
+                    idx[n_group,:,j // quantizer.vq_dim] = assmt.squeeze(-1)
             n_group += 1
         idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
         return (
