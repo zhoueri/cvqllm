@@ -147,7 +147,7 @@ def init_weight_list(weight_specs, policy, env):
 
             ret.append(weight)
             ret_codebook.append(codebook)
-            idx_position.append(len(codebook)-1)
+            idx_position.append(len(ret_codebook)-1)
         else:
 
             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
