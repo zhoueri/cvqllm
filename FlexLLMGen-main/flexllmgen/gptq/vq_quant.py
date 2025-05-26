@@ -233,7 +233,7 @@ class VQQuantizer(nn.Module):
         vq_dim=2,
         n_subsample=100000,
         columns_per_group=None,
-        kmeans_init_method="mahalanobis",
+        kmeans_init_method="kpp",
         assignment_chunk_size=None,
         kmeans_iters=10,
         codebook_bitwidth=None,
