@@ -211,7 +211,7 @@ class TorchVectorQuantDevice:
             new_indices[half:] = freq_sorted_indices[1::2]  # 奇数位放置
 
             # 4. 创建新旧索引映射
-            old_to_new = {old_idx.item(): new_idx.item() 
+            old_to_new = {old_idx.item(): new_idx 
                            for new_idx, old_idx in enumerate(new_indices)}
 
             # 5. 构建新的码本
