@@ -64,12 +64,12 @@ def general_copy_confidential(dst: ConfidentialTensor, dst_indices: Tuple[slice]
         assert dst.device.device_type == src.device.device_type == DeviceType.VECTORQUANT, "dst and src must be on the same device"
         if dst.device.base_device.device_type != src.device.base_device.device_type:  # Cross-device transfer occurs
             set_secure_flag()
-            general_copy(dst, dst_indices, src, src_indices)
+            general_copy(dst.data[0], dst_indices, src.data[0], src_indices)
             clear_secure_flag()
         else:
-            general_copy(dst, dst_indices, src, src_indices)
+            general_copy(dst.data[0], dst_indices, src.data[0], src_indices)
     else:
-        general_copy(dst, dst_indices, src, src_indices)
+        general_copy(dst.data[0], dst_indices, src.data[0], src_indices)
 
 def set_secure_flag():
     print("Secure flag set")
