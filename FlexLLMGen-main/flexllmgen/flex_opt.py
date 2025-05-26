@@ -24,7 +24,8 @@ from flexllmgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
     torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
     read_benchmark_log)
-from flexllmgen.vector_quant import VectorQuantConfig, print_memory_usage
+from flexllmgen.vector_quant import VectorQuantConfig
+from flexllmgen.debug_tool.memory_monitor import print_memory_usage
 
 fix_recursive_import()
 
@@ -94,7 +95,6 @@ def get_choice(cur_percent, percents, choices):
 
 
 def init_weight_list(weight_specs, policy, env):
-    print_memory_usage("初始化权重前")
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
     dev_choices = [env.disk, env.cpu, env.gpu]
 
