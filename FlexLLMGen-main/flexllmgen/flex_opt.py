@@ -108,9 +108,12 @@ def init_weight_list(weight_specs, policy, env):
         home = get_choice(mid_percent * 100, dev_percents, dev_choices)
         shape, dtype, filename = weight_specs[i]
 
+        is_embedding_matrix = "decoder.embed_tokens.weight" in filename
         if len(shape) < 2:
             pin_memory = True
             compress = False
+            vector_quant = False
+        elif is_embedding_matrix:
             vector_quant = False
         else:
             pin_memory = policy.pin_weight
