@@ -115,10 +115,13 @@ def init_weight_list(weight_specs, policy, env):
             vector_quant = False
         elif is_embedding_matrix:
             vector_quant = False
+            pin_memory = policy.pin_weight
+            compress = policy.compress_weight
         else:
             pin_memory = policy.pin_weight
             compress = policy.compress_weight
             vector_quant = policy.vector_quant
+            
         if compress:
             weight = home.compressed_device.allocate(
                 shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
