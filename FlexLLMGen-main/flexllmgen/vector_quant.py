@@ -10,42 +10,7 @@ from flexllmgen.utils import np_dtype_to_torch_dtype
 
 from flexllmgen.gptq.vq_quant import kpp_parallel_sampled, mahalanobis_init, VQQuantizer, vq_quantize
 
-import gc
-import psutil
-import os
-import sys
 
-def print_memory_usage(location="未指定位置"):
-    """打印当前内存使用情况"""
-    # 获取当前进程
-    process = psutil.Process(os.getpid())
-    # 获取内存信息 (RSS: 实际物理内存使用量)
-    memory_info = process.memory_info()
-    
-    # 获取PyTorch GPU内存信息
-    gpu_allocated = 0
-    gpu_reserved = 0
-    if torch.cuda.is_available():
-        gpu_allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
-        gpu_reserved = torch.cuda.memory_reserved() / (1024 ** 3)    # GB
-    
-    # 获取已分配的张量数量
-    tensor_count = 0
-    tensor_memory = 0
-    for obj in gc.get_objects():
-        try:
-            if torch.is_tensor(obj):
-                tensor_count += 1
-                tensor_memory += obj.element_size() * obj.nelement()
-        except:
-            pass
-    
-    print(f"位置: {location}")
-    print(f"CPU内存: {memory_info.rss / (1024 ** 3):.3f} GB")
-    print(f"PyTorch张量: {tensor_count}个, 共{tensor_memory / (1024 ** 3):.3f} GB")
-    print(f"GPU已分配: {gpu_allocated:.3f} GB, 保留: {gpu_reserved:.3f} GB")
-    print("-" * 50)
-    sys.stdout.flush()  # 确保立即输出
 
 @dataclasses.dataclass
 class VectorQuantConfig:
@@ -178,9 +143,7 @@ class TorchVectorQuantDevice:
         return k_cache, v_cache
     
     def simple_vq_quant(self, W, idx, centroids, quantizer, vectorquant_config):
-        print_memory_usage("simple_vq_quant开始")
         W1 = W.data.clone()
-        print_memory_usage("克隆W.data后")
         assert len(W1.shape) == 2, "Only 2D tensor is supported"
         W1 = W1.float()
         # idx = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W1.device)
@@ -189,19 +152,14 @@ class TorchVectorQuantDevice:
         for i in range(0, W.shape[1], quantizer.groupsize):
             end = min(i + quantizer.groupsize, W.shape[1])
             W_group = W1[:, i:end].clone()
-            print_memory_usage(f"码本: {n_group},初始化前,码本形状为{centroids.shape},分组码本形状为{centroids[n_group].shape}")
             centroids[n_group] = quantizer.find_param(W_group)
-            print_memory_usage(f"码本: {n_group},初始化后")
             for j in range(quantizer.groupsize):
                 if j % quantizer.vq_dim == 0:
                     w = W_group[:, j:j+quantizer.vq_dim]
-                    print_memory_usage(f"量化组:{j}")
                     q, assmt = vq_quantize(w, quantizer, centroids=centroids[n_group])
                     idx[n_group,:,j // quantizer.vq_dim] = assmt
             n_group += 1
-        print_memory_usage("开始优化索引脱敏")
         idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
-        print_memory_usage("索引脱敏结束")
         return (
             ConfidentialTensor(idx.shape, idx.dtype, (idx, quantizer, vectorquant_config), self), 
             ConfidentialTensor(centroids.shape, centroids.dtype, (centroids, quantizer, vectorquant_config), self, is_confidential=True, is_codebook=True),
@@ -222,10 +180,8 @@ class TorchVectorQuantDevice:
         # 获取原始数据
         # idx = idx_tensor.data.clone() if isinstance(idx_tensor.data, torch.Tensor) else idx_tensor.data
         # centroids = centroids_tensor.data.clone() if isinstance(centroids_tensor.data, torch.Tensor) else centroids_tensor.data
-        print_memory_usage("优化索引脱敏开始")
         idx = idx_tensor.data
         centroids = centroids_tensor.data 
-        print_memory_usage("获取数据后")
         # 获取形状
         batch_size, rows, cols = idx.shape
         _, centroids_G, n_centroids, vq_dim = centroids.shape
@@ -240,7 +196,6 @@ class TorchVectorQuantDevice:
         # 对每个批次独立处理
         for n in range(batch_size):
             # 1. 计算当前索引矩阵的统计信息
-            print_memory_usage(f"处理批次 {n}/{batch_size}")
             idx_flat = idx[n].reshape(-1).to(torch.long)
             idx_freq = torch.bincount(idx_flat, minlength=n_centroids)
 
@@ -250,9 +205,7 @@ class TorchVectorQuantDevice:
 
             # 3. 创建新的码本排列 - 采用交错模式
             # 这将使高频和低频索引交错分布，降低信息熵
-            print_memory_usage("创建新码本前")
             new_indices = torch.zeros_like(freq_sorted_indices)
-            print_memory_usage("创建新码本后")
             half = (n_centroids + 1) // 2
             new_indices[:half] = freq_sorted_indices[::2]  # 偶数位放置
             new_indices[half:] = freq_sorted_indices[1::2]  # 奇数位放置
@@ -280,10 +233,8 @@ class TorchVectorQuantDevice:
 
         # 9. 创建结果张量
         # 如果idx和centroids本身就是torch.Tensor，则直接使用
-        print_memory_usage("创建结果张量前")
         idx_tensor_new = TorchTensor.create_from_torch(idx, self.base_device)
         centroids_tensor_new = TorchTensor.create_from_torch(centroids, self.base_device)
-        print_memory_usage("创建结果张量后")
         # 返回优化后的张量
         return idx_tensor_new, centroids_tensor_new
     

@@ -14,7 +14,6 @@ def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
     X: G x N x D
     centroids: G x K x D
     """
-    print_memory_usage(f"get_assignments开始,X形状: {X.shape}, centroids形状: {centroids.shape}")
 
     if H_inv_diag is None:
         H_inv_diag = torch.ones(X.shape[-1]).to(X.device)
@@ -30,27 +29,22 @@ def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
         X_chunks = [X]
         H_inv_diag_chunks = [H_inv_diag]
     else:
-        print_memory_usage(f"分块处理 - 块大小: {chunk_size}")
         X_chunks = torch.split(X, chunk_size, dim=1)
         if H_inv_diag.ndim > 1:
             H_inv_diag_chunks = torch.split(H_inv_diag, chunk_size, dim=1)
         else:
             H_inv_diag_chunks = [H_inv_diag] * len(X_chunks)
-    print_memory_usage("准备计算距离")
 
     centroids = centroids.unsqueeze(1)  # G x 1 x K x D
 
     assignments = []
     for X, H_inv_diag in zip(X_chunks, H_inv_diag_chunks):
         X = X.unsqueeze(2)  # G x N' x 1 x D
-        print_memory_usage(f"扩展后X_chunk形状: {X.shape}")
 
-        print_memory_usage(f"计算距离矩阵前 - 将创建形状约为: {X.shape[0]}x{X.shape[1]}x{centroids.shape[2]}的张量")
         dist = ((X - centroids).pow(2) * H_inv_diag).sum(-1)
 
         assignments.append(dist.argmin(-1))  # G x N'
     assignments = torch.concat(assignments, dim=1)
-    print_memory_usage("get_assignments完成")
 
 
     return assignments  # G x N
@@ -83,7 +77,6 @@ def kmeans_m_step_3(
     X: torch.Tensor,
     H_inv_diag=None,
 ):
-    print_memory_usage("kmeans_m_step_3开始")
 
     """
     X: G x N x D
@@ -93,17 +86,13 @@ def kmeans_m_step_3(
     """
     crange = torch.arange(0, n_centroids).to(centroids.device)
 
-    print_memory_usage("计算扩展分配矩阵前")
 
     # G x N x 1 == 1 x 1 x K --> G x N x K
     assignments_expanded = (assignments.unsqueeze(-1) == crange.view(1, 1, -1)).to(X.dtype)
-    print_memory_usage("计算扩展分配矩阵后")
 
     if H_inv_diag is None:
-        print_memory_usage("计算正则化前")
 
         norm = 1.0 / torch.clip(assignments_expanded.sum(1), min=1)  # G x K
-        print_memory_usage("计算新码本前 (einsum)")
 
         clusters_for_centroid = torch.einsum("gnd,gnk,gk->gkd", X, assignments_expanded, norm)
     else:
@@ -113,7 +102,6 @@ def kmeans_m_step_3(
         clusters_for_centroid = torch.einsum(
             "gnd,nd,gnk,gkd->gkd", X, H_inv_diag[0], assignments_expanded, norm
         )
-    print_memory_usage("更新码本前")
 
     centroids.copy_(clusters_for_centroid)
 
@@ -127,25 +115,19 @@ def kmeans_vq(
     codebook_bitwidth=None,
     per_codebook=False,
 ):
-    print_memory_usage("kmeans_vq开始")
     n_centroids = centroids.shape[1]
     for iter in range(iters):
-        print_memory_usage(f"K-means迭代 {iter+1}/{iters}")
         # E-step
         assignments = get_assignments(
             X, centroids, chunk_size=assignment_chunk_size, H_inv_diag=H_inv_diag
         )
-        print_memory_usage("E-step完成")
 
         # M-step: gather all values for each centroid and compute means
         # Centroids is shape G x D x K; assignments is shape G x N
         kmeans_m_step_3(centroids, n_centroids, assignments, X, H_inv_diag=H_inv_diag)
-        print_memory_usage("M-step完成")
 
         if codebook_bitwidth is not None:
-            print_memory_usage("码本量化开始")
             quantize_centroids(centroids, codebook_bitwidth, per_codebook=per_codebook)
-            print_memory_usage("码本量化完成")
 
 
 
@@ -312,7 +294,6 @@ class VQQuantizer(nn.Module):
             if self.rows_per_group > 1:
                 H_inv_diag = H_inv_diag.tile(1, self.rows_per_group, 1)
 
-        print_memory_usage(f"初始化码本 - 方法: {self.kmeans_init_method}")
         if self.kmeans_init_method == "cdf":
             assert self.vq_dim == 1
             X, _ = torch.sort(X, 1)
@@ -325,7 +306,6 @@ class VQQuantizer(nn.Module):
         else:
             raise ValueError(f"Unkown k-means init method: {self.kmeans_init_method}")
 
-        print_memory_usage(f"码本初始化后形状: {centroids.shape}")
         # At this point, centroids should be shape G x K x D
         extra_args = {}
         if self.quantize_during_kmeans and self.codebook_bitwidth is not None:
@@ -333,7 +313,6 @@ class VQQuantizer(nn.Module):
                 codebook_bitwidth=self.codebook_bitwidth, per_codebook=self.quantize_per_codebook
             )
 
-        print_memory_usage(f"K-means开始 - 迭代次数: {self.kmeans_iters}")
         kmeans_vq(
             X,
             centroids,
@@ -344,11 +323,9 @@ class VQQuantizer(nn.Module):
         )
 
         if self.codebook_bitwidth is not None and not self.quantize_during_kmeans:
-            print_memory_usage("码本量化开始")
             quantize_centroids(
                 centroids, self.codebook_bitwidth, per_codebook=self.quantize_per_codebook
             )
-        print_memory_usage("码本量化完成")
 
         # self.all_centroids.append(centroids)
         return centroids
