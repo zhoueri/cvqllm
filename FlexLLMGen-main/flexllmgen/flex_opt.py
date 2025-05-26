@@ -133,9 +133,9 @@ def init_weight_list(weight_specs, policy, env):
             print_memory_usage("准备分配vector_quant权重前")
             weight = home.vector_quant_device.allocate(
                 shape, dtype, policy.vector_quant_config, pin_memory=pin_memory)
-            print_memory_usage("分配权重后,准备分配码本前")
+            print_memory_usage(f"分配权重后,准备分配码本前,张量大小为:{weight.data[0].shape}, dtype:{weight.data[0].dtype}, device:{weight.device}")
             codebook = home.vector_quant_device.allocate(shape, dtype, policy.vector_quant_config, pin_memory=pin_memory, codebook=True, quantizer=weight.data[1])
-            print_memory_usage("码本分配后")
+            print_memory_usage(f"码本分配后,张量大小为:{codebook.data[0].shape}, dtype:{codebook.data[0].dtype}, device:{codebook.device}")
 
             if DUMMY_WEIGHT not in filename:
                 print_memory_usage(f"加载权重前 - {filename}")

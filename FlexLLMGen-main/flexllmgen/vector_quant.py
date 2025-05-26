@@ -189,7 +189,7 @@ class TorchVectorQuantDevice:
         for i in range(0, W.shape[1], quantizer.groupsize):
             end = min(i + quantizer.groupsize, W.shape[1])
             W_group = W1[:, i:end].clone()
-            print_memory_usage(f"码本: {n_group},初始化前")
+            print_memory_usage(f"码本: {n_group},初始化前,码本形状为{centroids.shape},分组码本形状为{centroids[n_group].shape}")
             centroids[n_group] = quantizer.find_param(W_group)
             print_memory_usage(f"码本: {n_group},初始化后")
             for j in range(quantizer.groupsize):

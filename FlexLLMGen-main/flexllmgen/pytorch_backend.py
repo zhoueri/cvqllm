@@ -191,7 +191,7 @@ class ConfidentialTensor(TorchTensor):
             print_memory_usage(f"加载NumPy数组前 - 大小: {np_array.shape}")
             tmp = torch.from_numpy(np_array)
             idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.create_tmp_tensor(tmp, codebook.data[1])
-            print_memory_usage("创建临时张量后")
+            print_memory_usage(f"创建临时张量后,张量大小为: {tmp.shape},索引张量大小为:{idx_tmp.shape}, codebook大小为:{codebook_tmp.shape}")
             idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.simple_vq_quant(tmp, idx_tmp, codebook_tmp, codebook.data[1], codebook.data[2])
             print_memory_usage("量化后,准备复制")
             general_copy_confidential(self, None, tmp, None)
