@@ -14,7 +14,7 @@ def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
     X: G x N x D
     centroids: G x K x D
     """
-    print_memory_usage("get_assignments开始")
+    print_memory_usage(f"get_assignments开始,X形状: {X.shape}, centroids形状: {centroids.shape}")
 
     if H_inv_diag is None:
         H_inv_diag = torch.ones(X.shape[-1]).to(X.device)
@@ -43,7 +43,9 @@ def get_assignments(X, centroids, chunk_size=None, H_inv_diag=None):
     assignments = []
     for X, H_inv_diag in zip(X_chunks, H_inv_diag_chunks):
         X = X.unsqueeze(2)  # G x N' x 1 x D
+        print_memory_usage(f"扩展后X_chunk形状: {X.shape}")
 
+        print_memory_usage(f"计算距离矩阵前 - 将创建形状约为: {X.shape[0]}x{X.shape[1]}x{centroids.shape[2]}的张量")
         dist = ((X - centroids).pow(2) * H_inv_diag).sum(-1)
 
         assignments.append(dist.argmin(-1))  # G x N'

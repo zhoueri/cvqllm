@@ -17,6 +17,8 @@ from flexllmgen.utils import (GB, T, cpu_mem_stats, vector_gather,
     np_dtype_to_torch_dtype, torch_dtype_to_np_dtype,
     torch_dtype_to_num_bytes)
 
+from flexllmgen.debug_tool.memory_monitor import print_memory_usage
+
 general_copy_compressed = TorchCompressedDevice = None
 general_copy_confidential = TorchVectorQuantDevice = None
 global_cpu_device = None
@@ -183,8 +185,6 @@ class ConfidentialTensor(TorchTensor):
                   is_confidential=is_confidential, name=tensor.name)
     
     def load_from_np(self, np_array, codebook=None):
-        from flexllmgen.vector_quant import print_memory_usage
-        import gc
         if self.device.device_type == DeviceType.VECTORQUANT:
             assert codebook is not None, "codebook must be provided for vector quantization"
             assert isinstance(codebook, ConfidentialTensor), "codebook must be a ConfidentialTensor object"
@@ -199,8 +199,6 @@ class ConfidentialTensor(TorchTensor):
             print_memory_usage("复制完成")
             del idx_tmp, codebook_tmp
             print_memory_usage("删除临时变量后")
-            gc.collect()
-            print_memory_usage("垃圾回收后")
         else:
             super().load_from_np(np_array)
         
