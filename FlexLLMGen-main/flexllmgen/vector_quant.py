@@ -61,7 +61,7 @@ class VectorQuantConfig:
     codebook_bitwidth: Optional[int] = None  # 码本位宽
     
     # K-means算法参数
-    kmeans_init_method: str = "mahalanobis"  # K-means初始化方法: "kpp", "mahalanobis", "cdf"
+    kmeans_init_method: str = "kpp"  # K-means初始化方法: "kpp", "mahalanobis", "cdf"
     kmeans_iters: int = 10                   # K-means迭代次数
     assignment_chunk_size: Optional[int] = None  # 分配块大小
     kpp_n_subsample: int = 100000            # KPP子采样数量
