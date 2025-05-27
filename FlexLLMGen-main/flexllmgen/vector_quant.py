@@ -373,33 +373,55 @@ class VectorQuantizer(VQQuantizer):
         return centroids
 
     def dequantize(self, idx_tensor, centroids_tensor):
+        import time
+        total_start = time.time()
+        prep_start = time.time()
         idx = idx_tensor.data  # 索引张量
         centroids = centroids_tensor.data  # 码本张量
+        batch_size, rows, cols = idx.shape
+        prep_end = time.time()
+        prep_time = prep_end - prep_start
+    
+        # 方法1: 使用高级索引进行批量查找
+        # 创建索引数组
+        index_start = time.time()
+        g_indices = torch.arange(batch_size, device=idx_tensor.device.dev).view(batch_size, 1, 1).expand(batch_size, rows, cols)
+        r_indices = torch.arange(rows, device=idx_tensor.device.dev).view(1, rows, 1).expand(batch_size, rows, cols)
+        index_end = time.time()
+        index_time = index_end - index_start
+        # 获取所有向量 - 一次性索引操作
+        # shape: [batch_size, rows, cols, vq_dim]
+        # 3. 获取所有向量 - 高级索引操作
+        lookup_start = time.time()
+        all_vectors = centroids[g_indices, r_indices, idx]
+        lookup_end = time.time()
+        lookup_time = lookup_end - lookup_start
+        # 重塑结果为目标形状
+        # 首先重排维度 [batch_size, rows, cols, vq_dim] -> [rows, batch_size, cols, vq_dim]
+        # 4. 重塑结果为目标形状
+        reshape_start = time.time()
+        all_vectors = all_vectors.permute(1, 0, 2, 3)
+    
+        # 然后合并最后两个维度 [rows, batch_size, cols, vq_dim] -> [rows, batch_size, cols*vq_dim]
+        all_vectors = all_vectors.reshape(rows, batch_size, cols * self.vq_dim)
 
-        batch_size, rows, cols = idx_tensor.shape
-        total_cols = batch_size * cols * self.vq_dim
-        output = torch.zeros((rows, total_cols), device=idx_tensor.device.dev, 
-                             dtype=centroids_tensor.dtype)
-        
-        for g in range(batch_size):
-            # 计算当前组在原始矩阵中的列范围
-            start_col = g * cols * self.vq_dim
-        
-            # 处理每个量化索引
-            for c in range(cols):
-                # 计算当前向量在输出中的起始列位置
-                col_idx = start_col + c * self.vq_dim
-            
-                # 对每行进行处理
-                for r in range(rows):
-                    # 获取当前位置的码本索引
-                    centroid_idx = idx[g, r, c].item()
-                
-                    # 从码本中获取对应的向量
-                    vec = centroids[g, r, centroid_idx, :]
-                
-                    # 将向量放回原始位置
-                    output[r, col_idx:col_idx+self.vq_dim] = vec
+        # 最后合并第二、三维度 [rows, batch_size, cols*vq_dim] -> [rows, batch_size*cols*vq_dim]
+        output = all_vectors.reshape(rows, batch_size * cols * self.vq_dim)
+        reshape_end = time.time()
+        reshape_time = reshape_end - reshape_start
+
+        # 总时间统计
+        total_end = time.time()
+        total_time = total_end - total_start
+    
+        # 打印性能数据
+        print(f"解量化性能分析 (形状: {rows}x{batch_size*cols*self.vq_dim}):")
+        print(f"  数据准备时间: {prep_time*1000:.2f}ms ({prep_time/total_time*100:.1f}%)")
+        print(f"  索引创建时间: {index_time*1000:.2f}ms ({index_time/total_time*100:.1f}%)")
+        print(f"  向量查找时间: {lookup_time*1000:.2f}ms ({lookup_time/total_time*100:.1f}%)")
+        print(f"  维度重塑时间: {reshape_time*1000:.2f}ms ({reshape_time/total_time*100:.1f}%)")
+        print(f"  总执行时间: {total_time*1000:.2f}ms")
+    
         return output
 
 
