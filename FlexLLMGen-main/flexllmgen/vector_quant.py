@@ -347,7 +347,7 @@ class VectorQuantizer(VQQuantizer):
         assert len(w.shape) == 2, "Only 2D tensor is supported"
             # 获取关键参数
         vq_dim = self.vq_dim
-        n_centroids = 2 ** (self.wbit * vq_dim)
+        n_centroids = self.n_centroids
     
         # 重塑数据为标准格式
         W_reshaped = w.reshape(self.groups_per_column, -1, vq_dim)  # G x N x D

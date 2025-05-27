@@ -313,14 +313,14 @@ class VQQuantizer(nn.Module):
                 codebook_bitwidth=self.codebook_bitwidth, per_codebook=self.quantize_per_codebook
             )
 
-        # kmeans_vq(
-        #     X,
-        #     centroids,
-        #     iters=self.kmeans_iters,
-        #     assignment_chunk_size=self.assignment_chunk_size,
-        #     H_inv_diag=H_inv_diag,
-        #     **extra_args,
-        # )
+        kmeans_vq(
+            X,
+            centroids,
+            iters=self.kmeans_iters,
+            assignment_chunk_size=self.assignment_chunk_size,
+            H_inv_diag=H_inv_diag,
+            **extra_args,
+        )
 
         if self.codebook_bitwidth is not None and not self.quantize_during_kmeans:
             quantize_centroids(
