@@ -149,9 +149,7 @@ def init_weight_list(weight_specs, policy, env):
             ret_codebook.append(codebook)
             idx_position.append(len(ret_codebook)-1)
         else:
-
             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-
             if DUMMY_WEIGHT not in filename:
                 weight.load_from_np_file(weight_specs[i][2])
             else:

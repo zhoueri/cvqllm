@@ -280,8 +280,8 @@ class TorchVectorQuantDevice:
         """创建临时张量"""
         idx_shape = quantizer.idx_shape
         centroids_shape = quantizer.centroids_shape
-        idx = torch.zeros(idx_shape, dtype=np_dtype_to_torch_dtype[quantizer.idx_dtype], device=X.device)
-        centroids = torch.zeros(centroids_shape, dtype=np_dtype_to_torch_dtype[quantizer.centroids_dtype], device=X.device)
+        idx = torch.zeros(idx_shape, dtype=np_dtype_to_torch_dtype[quantizer.idx_dtype], device=self.base_device)
+        centroids = torch.zeros(centroids_shape, dtype=np_dtype_to_torch_dtype[quantizer.centroids_dtype], device=self.base_device)
         return idx, centroids
 
 
