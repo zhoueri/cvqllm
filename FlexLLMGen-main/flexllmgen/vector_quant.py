@@ -373,8 +373,8 @@ class VectorQuantizer(VQQuantizer):
         return centroids
 
     def dequantize(self, idx_tensor, centroids_tensor):
-        idx = idx_tensor.data[0]  # 索引张量
-        centroids = centroids_tensor.data[0]  # 码本张量
+        idx = idx_tensor.data  # 索引张量
+        centroids = centroids_tensor.data  # 码本张量
 
         batch_size, rows, cols = idx_tensor.shape
 
