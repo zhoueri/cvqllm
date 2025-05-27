@@ -141,23 +141,57 @@ class TorchVectorQuantDevice:
         return k_cache, v_cache
     
     def simple_vq_quant(self, W, idx, centroids, quantizer, vectorquant_config):
+        import time
+        total_start = time.time()
         W1 = W.data.clone()
         assert len(W1.shape) == 2, "Only 2D tensor is supported"
         W1 = W1.float()
+        prep_end = time.time()
+        print(f"Preparation time: {prep_end - total_start:.4f} seconds")
         # idx = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W1.device)
         # centroids = torch.zeros(quantizer.centroids_shape, dtype=W1.dtype, device=W1.device)
         n_group = 0
+        total_find_param_time = 0
+        total_vq_quantize_time = 0
+
+        main_loop_start = time.time()
         for i in range(0, W.shape[1], quantizer.groupsize):
+            group_start = time.time()
             end = min(i + quantizer.groupsize, W.shape[1])
             W_group = W1[:, i:end].clone()
+
+            find_param_start = time.time()
             centroids[n_group] = quantizer.find_param(W_group)
+            find_param_end = time.time()
+            find_param_time = find_param_end - find_param_start
+            total_find_param_time += find_param_time
+
+            vq_start = time.time()
             for j in range(quantizer.groupsize):
                 if j % quantizer.vq_dim == 0:
                     w = W_group[:, j:j+quantizer.vq_dim]
                     q, assmt = vq_quantize(w, quantizer, centroids=centroids[n_group])
                     idx[n_group,:,j // quantizer.vq_dim] = assmt.squeeze(-1)
+            vq_end = time.time()
+            vq_time = vq_end - vq_start
+            total_vq_quantize_time += vq_time
             n_group += 1
+            group_end = time.time()
+            if n_group % 10 == 0:  # 每10组打印一次
+                print(f"组 {n_group}/{W.shape[1]//quantizer.groupsize}: "
+                    f"码本计算耗时={find_param_time:.4f}秒, "
+                    f"向量量化耗时={vq_time:.4f}秒, "
+                    f"总耗时={group_end-group_start:.4f}秒")
+        main_loop_end = time.time()
+        print(f"主循环总耗时: {main_loop_end - main_loop_start:.4f}秒")
+        print(f"- 码本计算总耗时: {total_find_param_time:.4f}秒 ({total_find_param_time/(main_loop_end-main_loop_start)*100:.1f}%)")
+        print(f"- 向量量化总耗时: {total_vq_quantize_time:.4f}秒 ({total_vq_quantize_time/(main_loop_end-main_loop_start)*100:.1f}%)")
+   
+        desensitize_start = time.time()
         idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
+        desensitize_end = time.time()
+        print(f"索引脱敏优化耗时: {desensitize_end - desensitize_start:.4f}秒")
+   
         return (
             ConfidentialTensor(idx.shape, idx.dtype, (idx, quantizer, vectorquant_config), self), 
             ConfidentialTensor(centroids.shape, centroids.dtype, (centroids, quantizer, vectorquant_config), self, is_confidential=True, is_codebook=True),
