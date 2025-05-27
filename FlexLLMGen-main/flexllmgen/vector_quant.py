@@ -345,7 +345,36 @@ class VectorQuantizer(VQQuantizer):
     
     def find_param(self, w):
         assert len(w.shape) == 2, "Only 2D tensor is supported"
-        return super().find_params(w)
+            # 获取关键参数
+        vq_dim = self.vq_dim
+        n_centroids = 2 ** (self.wbit * vq_dim)
+    
+        # 重塑数据为标准格式
+        W_reshaped = w.reshape(self.groups_per_column, -1, vq_dim)  # G x N x D
+    
+        # 初始化结果张量
+        centroids = torch.zeros((self.groups_per_column, n_centroids, vq_dim), 
+                           dtype=w.dtype, device=w.device)
+    
+        # 为每个分组快速生成码本
+        for g in range(self.groups_per_column):
+            # 获取数据范围
+            min_val = W_reshaped[g].min(dim=0)[0]  # 每个维度的最小值
+            max_val = W_reshaped[g].max(dim=0)[0]  # 每个维度的最大值
+            range_val = max_val - min_val
+        
+            # 确保范围不为零
+            range_val = torch.where(range_val > 0, range_val, torch.ones_like(range_val))
+        
+            # 方法1: 线性分布 - 在数据范围内均匀分布码书向量
+            for i in range(n_centroids):
+                # 计算位置因子 (0到1之间)
+                t = i / (n_centroids - 1) if n_centroids > 1 else 0.5
+                # 生成均匀分布的码本向量
+                centroids[g, i] = min_val + t * range_val
+
+        # return super().find_params(w)
+        return centroids
 
     def dequantize(self, idx, centroids):
         batch_size, rows, cols = idx.shape
