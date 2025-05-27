@@ -377,19 +377,30 @@ class VectorQuantizer(VQQuantizer):
         centroids = centroids_tensor.data  # 码本张量
 
         batch_size, rows, cols = idx_tensor.shape
-
-        output = torch.zeros(batch_size, rows, cols * self.vq_dim, 
-                            device=idx_tensor.device.dev, dtype=centroids_tensor.dtype)
+        total_cols = batch_size * cols * self.vq_dim
+        output = torch.zeros((rows, total_cols), device=idx_tensor.device.dev, 
+                             dtype=centroids_tensor.dtype)
         
-        for n in range(batch_size):
-            for r in range(rows):
-                for c in range(cols):
-                    index = idx[n, r, c].item()
-                    vec = centroids[n, 0, index, :]
-                    output[n, r, c*self.vq_dim:(c+1)*self.vq_dim] = vec
-
-        original_shape = (rows, batch_size, cols * self.vq_dim)
-        return output.permute(1, 0, 2).reshape(original_shape)
+        for g in range(batch_size):
+            # 计算当前组在原始矩阵中的列范围
+            start_col = g * cols * self.vq_dim
+        
+            # 处理每个量化索引
+            for c in range(cols):
+                # 计算当前向量在输出中的起始列位置
+                col_idx = start_col + c * self.vq_dim
+            
+                # 对每行进行处理
+                for r in range(rows):
+                    # 获取当前位置的码本索引
+                    centroid_idx = idx[g, r, c].item()
+                
+                    # 从码本中获取对应的向量
+                    vec = centroids[g, r, centroid_idx, :]
+                
+                    # 将向量放回原始位置
+                    output[r, col_idx:col_idx+self.vq_dim] = vec
+        return output
 
 
 
