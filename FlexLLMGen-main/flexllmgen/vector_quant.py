@@ -187,10 +187,10 @@ class TorchVectorQuantDevice:
         print(f"- 码本计算总耗时: {total_find_param_time:.4f}秒 ({total_find_param_time/(main_loop_end-main_loop_start)*100:.1f}%)")
         print(f"- 向量量化总耗时: {total_vq_quantize_time:.4f}秒 ({total_vq_quantize_time/(main_loop_end-main_loop_start)*100:.1f}%)")
    
-        desensitize_start = time.time()
-        idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
-        desensitize_end = time.time()
-        print(f"索引脱敏优化耗时: {desensitize_end - desensitize_start:.4f}秒")
+        # desensitize_start = time.time()
+        # idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
+        # desensitize_end = time.time()
+        # print(f"索引脱敏优化耗时: {desensitize_end - desensitize_start:.4f}秒")
    
         return (
             ConfidentialTensor(idx.shape, idx.dtype, (idx, quantizer, vectorquant_config), self), 
