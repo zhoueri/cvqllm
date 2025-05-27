@@ -376,7 +376,7 @@ class VectorQuantizer(VQQuantizer):
         batch_size, rows, cols = idx.shape
     
         output = torch.zeros(batch_size, rows, cols * self.vq_dim, 
-                            device=idx.device, dtype=centroids.dtype)
+                            device=idx.device.base_device.dev, dtype=centroids.dtype)
     
         for n in range(batch_size):
             for r in range(rows):

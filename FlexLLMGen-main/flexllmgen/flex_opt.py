@@ -781,9 +781,19 @@ class OptLM:
             for x in self.weight_home[j].pop():
                 if isinstance(x, ValueHolder):
                     for y in x.pop():
-                        y.delete()
+                        y_weight, y_codebook, y_idx_position = y
+                        for tensor in y_weight:
+                            tensor.delete()
+                        if y_codebook is not None:
+                            for tensor in y_codebook:
+                                tensor.delete()
                 else:
-                    x.delete()
+                    x_weight, x_codebook, x_idx_position = x
+                    for tensor in x_weight:
+                        tensor.delete()
+                    if x_codebook is not None:
+                        for tensor in x_codebook:
+                            tensor.delete()
 
     def init_cache(self, j, k):
         self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
