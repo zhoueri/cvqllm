@@ -378,35 +378,23 @@ class VectorQuantizer(VQQuantizer):
         prep_start = time.time()
         idx = idx_tensor.data  # 索引张量
         centroids = centroids_tensor.data  # 码本张量
-        batch_size, rows, cols = idx.shape
+        B, R, C = idx.shape
+        D = self.vq_dim
         prep_end = time.time()
         prep_time = prep_end - prep_start
     
-        # 方法1: 使用高级索引进行批量查找
-        # 创建索引数组
         index_start = time.time()
-        g_indices = torch.arange(batch_size, device=idx_tensor.device.dev).view(batch_size, 1, 1).expand(batch_size, rows, cols)
-        r_indices = torch.arange(rows, device=idx_tensor.device.dev).view(1, rows, 1).expand(batch_size, rows, cols)
+        cent_flat = centroids.view(B*R, -1, D)      # [B*R, K, D]
+        idx_flat  = idx.view(B*R, C) 
         index_end = time.time()
         index_time = index_end - index_start
-        # 获取所有向量 - 一次性索引操作
-        # shape: [batch_size, rows, cols, vq_dim]
-        # 3. 获取所有向量 - 高级索引操作
-        lookup_start = time.time()
-        all_vectors = centroids[g_indices, r_indices, idx, :]
-        lookup_end = time.time()
-        lookup_time = lookup_end - lookup_start
-        # 重塑结果为目标形状
-        # 首先重排维度 [batch_size, rows, cols, vq_dim] -> [rows, batch_size, cols, vq_dim]
-        # 4. 重塑结果为目标形状
+
         reshape_start = time.time()
-        all_vectors = all_vectors.permute(1, 0, 2, 3)
-    
-        # 然后合并最后两个维度 [rows, batch_size, cols, vq_dim] -> [rows, batch_size, cols*vq_dim]
-        all_vectors = all_vectors.reshape(rows, batch_size, cols * self.vq_dim)
+        idx_exp   = idx_flat.unsqueeze(-1).expand(-1, -1, D)
+        lookup    = torch.gather(cent_flat, 1, idx_exp)  # [B*R, C, D]
 
         # 最后合并第二、三维度 [rows, batch_size, cols*vq_dim] -> [rows, batch_size*cols*vq_dim]
-        output = all_vectors.reshape(rows, batch_size * cols * self.vq_dim)
+        output = lookup.reshape(B, R, C*D).permute(1, 0, 2).reshape(R, B*C*D)
         reshape_end = time.time()
         reshape_time = reshape_end - reshape_start
 
@@ -415,10 +403,9 @@ class VectorQuantizer(VQQuantizer):
         total_time = total_end - total_start
     
         # 打印性能数据
-        print(f"解量化性能分析 (形状: {rows}x{batch_size*cols*self.vq_dim}):")
+        print(f"解量化性能分析 (形状: {R}x{B*C*self.vq_dim}):")
         print(f"  数据准备时间: {prep_time*1000:.2f}ms ({prep_time/total_time*100:.1f}%)")
         print(f"  索引创建时间: {index_time*1000:.2f}ms ({index_time/total_time*100:.1f}%)")
-        print(f"  向量查找时间: {lookup_time*1000:.2f}ms ({lookup_time/total_time*100:.1f}%)")
         print(f"  维度重塑时间: {reshape_time*1000:.2f}ms ({reshape_time/total_time*100:.1f}%)")
         print(f"  总执行时间: {total_time*1000:.2f}ms")
     
