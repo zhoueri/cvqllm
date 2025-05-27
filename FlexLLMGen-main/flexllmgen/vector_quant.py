@@ -191,6 +191,8 @@ class TorchVectorQuantDevice:
         # idx, centroids = self.optimize_index_desensitization(idx, centroids, quantizer)
         # desensitize_end = time.time()
         # print(f"索引脱敏优化耗时: {desensitize_end - desensitize_start:.4f}秒")
+        idx = TorchTensor.create_from_torch(idx, self.base_device)
+        centroids = TorchTensor.create_from_torch(centroids, self.base_device)
    
         return (
             ConfidentialTensor(idx.shape, idx.dtype, (idx, quantizer, vectorquant_config), self), 
@@ -280,8 +282,10 @@ class TorchVectorQuantDevice:
         """创建临时张量"""
         idx_shape = quantizer.idx_shape
         centroids_shape = quantizer.centroids_shape
-        idx = torch.zeros(idx_shape, dtype=np_dtype_to_torch_dtype[quantizer.idx_dtype], device=self.base_device)
-        centroids = torch.zeros(centroids_shape, dtype=np_dtype_to_torch_dtype[quantizer.centroids_dtype], device=self.base_device)
+        idx = torch.zeros(idx_shape, dtype=np_dtype_to_torch_dtype[quantizer.idx_dtype])
+        centroids = torch.zeros(centroids_shape, dtype=np_dtype_to_torch_dtype[quantizer.centroids_dtype])
+        # idx = TorchTensor.create_from_torch(idx, self.base_device)
+        # centroids = TorchTensor.create_from_torch(centroids, self.base_device)
         return idx, centroids
 
 
