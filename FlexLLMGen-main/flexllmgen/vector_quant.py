@@ -349,29 +349,25 @@ class VectorQuantizer(VQQuantizer):
         vq_dim = self.vq_dim
         n_centroids = self.n_centroids
     
-        # 重塑数据为标准格式
         W_reshaped = w.reshape(self.groups_per_column, -1, vq_dim)  # G x N x D
     
-        # 初始化结果张量
-        centroids = torch.zeros((self.groups_per_column, n_centroids, vq_dim), 
-                           dtype=w.dtype, device=w.device)
+            # 向量化计算：所有组的min和max同时计算
+        min_vals = W_reshaped.min(dim=1)[0]  # 形状: [G, D]
+        max_vals = W_reshaped.max(dim=1)[0]  # 形状: [G, D]
     
-        # 为每个分组快速生成码本
-        for g in range(self.groups_per_column):
-            # 获取数据范围
-            min_val = W_reshaped[g].min(dim=0)[0]  # 每个维度的最小值
-            max_val = W_reshaped[g].max(dim=0)[0]  # 每个维度的最大值
-            range_val = max_val - min_val
-        
-            # 确保范围不为零
-            range_val = torch.where(range_val > 0, range_val, torch.ones_like(range_val))
-        
-            # 方法1: 线性分布 - 在数据范围内均匀分布码书向量
-            for i in range(n_centroids):
-                # 计算位置因子 (0到1之间)
-                t = i / (n_centroids - 1) if n_centroids > 1 else 0.5
-                # 生成均匀分布的码本向量
-                centroids[g, i] = min_val + t * range_val
+        # 计算范围，确保不为零
+        range_vals = max_vals - min_vals
+        range_vals = torch.where(range_vals > 0, range_vals, torch.ones_like(range_vals))
+    
+        # 创建线性分布并调整维度以便广播
+        t_values = torch.linspace(0, 1, n_centroids, device=w.device).view(1, -1, 1)
+    
+        # 调整min_vals和range_vals的维度以便广播
+        min_vals = min_vals.unsqueeze(1)   # [G, 1, D]
+        range_vals = range_vals.unsqueeze(1)  # [G, 1, D]
+    
+        # 利用广播机制一次性计算所有码本向量
+        centroids = min_vals + t_values * range_vals
 
         # return super().find_params(w)
         return centroids
