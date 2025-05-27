@@ -372,12 +372,15 @@ class VectorQuantizer(VQQuantizer):
         # return super().find_params(w)
         return centroids
 
-    def dequantize(self, idx, centroids):
-        batch_size, rows, cols = idx.shape
-    
+    def dequantize(self, idx_tensor, centroids_tensor):
+        idx = idx_tensor.data[0]  # 索引张量
+        centroids = centroids_tensor.data[0]  # 码本张量
+
+        batch_size, rows, cols = idx_tensor.shape
+
         output = torch.zeros(batch_size, rows, cols * self.vq_dim, 
-                            device=idx.device.dev, dtype=centroids.dtype)
-    
+                            device=idx_tensor.device.dev, dtype=centroids_tensor.dtype)
+        
         for n in range(batch_size):
             for r in range(rows):
                 for c in range(cols):

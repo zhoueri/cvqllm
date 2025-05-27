@@ -783,11 +783,13 @@ class OptLM:
                     for y in x.pop():
                         if y is not None:
                             for tensor in y:
-                                tensor.delete()
+                                if hasattr(tensor, 'delete'):
+                                    tensor.delete()
                 else:
                     if x is not None:
                         for tensor in x:
-                            tensor.delete()
+                            if hasattr(tensor, 'delete'):
+                                tensor.delete()
 
     def init_cache(self, j, k):
         self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
