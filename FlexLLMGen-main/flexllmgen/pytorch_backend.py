@@ -350,7 +350,7 @@ class TorchDevice:
         data = token_embed + pos_embed
         return TorchTensor.create_from_torch(data, self)
 
-    def opt_output_embed(self, inputs, weight, codebook, idx_position, w_token, donate,
+    def opt_output_embed(self, inputs, weight, codebook, idx_position, donate,
                          do_sample, temperature):
         # decompress weights
         # if w_token.device.device_type == DeviceType.COMPRESSED:
