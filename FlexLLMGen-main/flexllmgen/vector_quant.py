@@ -393,7 +393,7 @@ class VectorQuantizer(VQQuantizer):
         # shape: [batch_size, rows, cols, vq_dim]
         # 3. 获取所有向量 - 高级索引操作
         lookup_start = time.time()
-        all_vectors = centroids[g_indices, r_indices, idx]
+        all_vectors = centroids[g_indices, r_indices, idx, :]
         lookup_end = time.time()
         lookup_time = lookup_end - lookup_start
         # 重塑结果为目标形状
