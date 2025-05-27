@@ -86,8 +86,6 @@ class TorchVectorQuantDevice:
         self.name = "vector_quant"
         self.device_type = DeviceType.VECTORQUANT
         self.base_device = base_device
-        self.data_dequant_workspace = None
-        self.workspace_pt = 0
 
     def allocate(self, shape, dtype, vectorquant_config, pin_memory=None, name=None, codebook=False, quantizer=None):
         '''Allocate a tensor in vector quant format.'''

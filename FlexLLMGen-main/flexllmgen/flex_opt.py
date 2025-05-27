@@ -119,7 +119,7 @@ def init_weight_list(weight_specs, policy, env):
             compress = policy.compress_weight
         else:
             pin_memory = policy.pin_weight
-            compress = policy.compress_weight
+            compress = False
             vector_quant = policy.vector_quant
             
         if compress:
@@ -198,7 +198,6 @@ class InputEmbed:
         weight, codebook, idx_position = weight_home.val
         if k == 0:
             dst = self.weight_load_dst
-            # 1. 复制idx列表中的所有张量
             copied_weight = [tensor_copy for tensor_copy, _ in (tensor.smart_copy(dst) for tensor in weight)]
         
             # 2. 复制codebook列表中的所有张量

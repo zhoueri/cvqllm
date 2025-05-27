@@ -143,6 +143,8 @@ class TorchTensor:
 
         if dst.device_type == DeviceType.COMPRESSED:
             ret = dst.allocate(shape, torch_dtype_to_np_dtype[self.dtype], self.data[2])
+        elif dst.device_type == DeviceType.VECTORQUANT:  # only happens when the embedding vector is not quantized.
+            ret = dst.base_device.allocate(shape, torch_dtype_to_np_dtype[self.dtype])
         else:
             ret = dst.allocate(shape, torch_dtype_to_np_dtype[self.dtype])
         general_copy(ret, None, self, src_indices)
