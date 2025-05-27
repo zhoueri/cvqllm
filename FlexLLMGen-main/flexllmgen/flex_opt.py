@@ -781,18 +781,12 @@ class OptLM:
             for x in self.weight_home[j].pop():
                 if isinstance(x, ValueHolder):
                     for y in x.pop():
-                        y_weight, y_codebook, y_idx_position = y
-                        for tensor in y_weight:
-                            tensor.delete()
-                        if y_codebook is not None:
-                            for tensor in y_codebook:
+                        if y is not None:
+                            for tensor in y:
                                 tensor.delete()
                 else:
-                    x_weight, x_codebook, x_idx_position = x
-                    for tensor in x_weight:
-                        tensor.delete()
-                    if x_codebook is not None:
-                        for tensor in x_codebook:
+                    if x is not None:
+                        for tensor in x:
                             tensor.delete()
 
     def init_cache(self, j, k):
