@@ -390,7 +390,7 @@ class VectorQuantizer(VQQuantizer):
         index_time = index_end - index_start
 
         reshape_start = time.time()
-        idx_exp   = idx_flat.unsqueeze(-1).expand(-1, -1, D)
+        idx_exp   = idx_flat.unsqueeze(-1).expand(-1, -1, D).to(torch.int64)
         lookup    = torch.gather(cent_flat, 1, idx_exp)  # [B*R, C, D]
 
         # 最后合并第二、三维度 [rows, batch_size, cols*vq_dim] -> [rows, batch_size*cols*vq_dim]
