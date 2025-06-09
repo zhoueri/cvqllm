@@ -10,6 +10,7 @@ from flexllmgen.utils import np_dtype_to_torch_dtype
 
 from flexllmgen.gptq.vq_quant import kpp_parallel_sampled, mahalanobis_init, VQQuantizer, vq_quantize
 
+from flexllmgen.encrypt_engine.encrypt import encrypt_tensor_aes_ctr, decrypt_tensor_aes_ctr, encrypt_tensor_cuda_aes_ctr, decrypt_tensor_cuda_aes_ctr
 
 
 @dataclasses.dataclass
@@ -63,21 +64,41 @@ def general_copy_confidential(dst: ConfidentialTensor, dst_indices: Tuple[slice]
         assert dst.is_confidential, "dst must be confidential"
         assert dst.device.device_type == src.device.device_type == DeviceType.VECTORQUANT, "dst and src must be on the same device"
         if dst.device.base_device.device_type != src.device.base_device.device_type:  # Cross-device transfer occurs
-            set_secure_flag()
-            general_copy(dst.data[0], dst_indices, src.data[0], src_indices)
-            clear_secure_flag()
+            # 创建临时加密张量
+            encrypted_tensor = create_encrypted_copy(src)
+            try:
+                # 传输加密数据
+                general_copy(dst.data[0], dst_indices, encrypted_tensor.data, src_indices)
+                # 就地解密目标数据
+                dst.data[0].data = tensor_decrypt_inplace(dst.data[0].data, dst.device.base_device)
+                print("✓ 加密传输成功完成")
+            except Exception as e:
+                print(f"✗ 加密传输失败: {e}")
+                raise
+            finally:
+                # 清理临时加密张量
+                del encrypted_tensor
         else:
             general_copy(dst.data[0], dst_indices, src.data[0], src_indices)
     else:
         general_copy(dst.data[0], dst_indices, src.data[0], src_indices)
 
-def set_secure_flag():
-    print("Secure flag set")
-    pass
+def create_encrypted_copy(tensor: ConfidentialTensor):
+    data_copy = tensor.data[0].data.clone()
+    if tensor.base_device.device_type == DeviceType.CUDA:
+        encrypt_tensor = encrypt_tensor_cuda_aes_ctr(data_copy)
+    else:
+        encrypt_tensor = encrypt_tensor_aes_ctr(data_copy)
+    
+    return TorchTensor.create_from_torch(encrypt_tensor, tensor.base_device)
 
-def clear_secure_flag():
-    print("Secure flag cleared")
-    pass
+def tensor_decrypt_inplace(tensor: torch.Tensor, base_device: TorchDevice):
+    if base_device == DeviceType.CUDA:
+        decrypt_tensor = decrypt_tensor_cuda_aes_ctr(tensor)
+    else:
+        decrypt_tensor = decrypt_tensor_aes_ctr(tensor)
+        
+    return decrypt_tensor
 
 class TorchVectorQuantDevice:
 
