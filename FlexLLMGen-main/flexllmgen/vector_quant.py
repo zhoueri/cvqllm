@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import dataclasses
-
+import torch.nn.functional as F
 from typing import Optional, Union, Tuple
 
 from flexllmgen.pytorch_backend import (TorchTensor, TorchDevice,
@@ -68,7 +68,7 @@ def general_copy_confidential(dst: ConfidentialTensor, dst_indices: Tuple[slice]
             encrypted_tensor = create_encrypted_copy(src)
             try:
                 # 传输加密数据
-                general_copy(dst.data[0], dst_indices, encrypted_tensor.data, src_indices)
+                general_copy(dst.data[0], dst_indices, encrypted_tensor, src_indices)
                 # 就地解密目标数据
                 dst.data[0].data = tensor_decrypt_inplace(dst.data[0].data, dst.device.base_device)
                 print("✓ 加密传输成功完成")
@@ -85,15 +85,15 @@ def general_copy_confidential(dst: ConfidentialTensor, dst_indices: Tuple[slice]
 
 def create_encrypted_copy(tensor: ConfidentialTensor):
     data_copy = tensor.data[0].data.clone()
-    if tensor.base_device.device_type == DeviceType.CUDA:
+    if tensor.device.base_device.device_type == DeviceType.CUDA:
         encrypt_tensor = encrypt_tensor_cuda_aes_ctr(data_copy)
     else:
         encrypt_tensor = encrypt_tensor_aes_ctr(data_copy)
     
-    return TorchTensor.create_from_torch(encrypt_tensor, tensor.base_device)
+    return TorchTensor.create_from_torch(encrypt_tensor, tensor.device.base_device)
 
 def tensor_decrypt_inplace(tensor: torch.Tensor, base_device: TorchDevice):
-    if base_device == DeviceType.CUDA:
+    if base_device.device_type == DeviceType.CUDA:
         decrypt_tensor = decrypt_tensor_cuda_aes_ctr(tensor)
     else:
         decrypt_tensor = decrypt_tensor_aes_ctr(tensor)
@@ -113,17 +113,28 @@ class TorchVectorQuantDevice:
         wbits = vectorquant_config.wbit
         vq_dim = vectorquant_config.vq_dim
         n_centroids = 2 ** (wbits * vq_dim) # "K = 2^(wbits * vq_dim)"
-
-        assert len(shape) == 2, "Only 2D tensor is supported"
+        
+        if len(shape) == 2:
+            row, col = shape
+        elif len(shape) == 3:
+            row, col = shape[1], shape[2] # "for kv cache"
+        else:
+            raise ValueError(f"Unsupported shape {shape}, only 2D or 3D tensors are supported")
+        
         if quantizer is None:
             quantizer = VectorQuantizer(vectorquant_config)
             quantizer.configure(vectorquant_config.wbit) 
         groupsize, centroids_G = quantizer.get_groupsize(shape, vectorquant_config.groupsize) # "In most case, G = shape[0]"
-        n_groups = shape[1] // groupsize # "Number of quant groups"
-        assert shape[1] % groupsize == 0, f"shape[1] {shape[1]} is not divisible by groupsize {groupsize}"
+        print(f"groupsize: {groupsize}, centroids_G: {centroids_G}")
+        quantizer.groupsize = groupsize
+        quantizer.centroids_G = centroids_G
+        n_groups = (row // centroids_G) * (col // groupsize) # "Number of quant groups"
+        assert col % groupsize == 0, f"shape[1] {col} is not divisible by groupsize {groupsize}"
         
         if codebook:
-            centroids_shape = (int(n_groups), int(centroids_G), int(n_centroids), int(vq_dim)) # "N x G x K x D"
+            assert len(shape) == 2, "Only 2D tensor is supported"
+            centroids_shape = (np.int64(n_groups), np.int64(centroids_G), np.int64(n_centroids), np.int64(vq_dim)) # "N x G x K x D"
+            print(f"shape of centroids: {centroids_shape}, dtype: {dtype}")
             quantizer.centroids_shape = centroids_shape
             quantizer.centroids_dtype = dtype
             centroids = self.base_device.allocate(centroids_shape, dtype,
@@ -132,8 +143,10 @@ class TorchVectorQuantDevice:
             return ConfidentialTensor(shape, np_dtype_to_torch_dtype[dtype], 
                             (centroids, quantizer, vectorquant_config), self, is_confidential=True, name = name, is_codebook=True)
         else:
-            idx_shape = (int(n_groups), int(shape[0]), int(groupsize // vq_dim)) # "N x G x R // N // D "
-            '''The data type of the index tensor is related to the number of codebooks'''
+            if len(shape) == 2:
+                idx_shape = (np.int64(n_groups), np.int64(centroids_G), np.int64(groupsize // vq_dim)) # "N x G x R // N // D "
+            else:
+                idx_shape = (shape[0] ,np.int64(n_groups), np.int64(centroids_G), np.int64(groupsize // vq_dim)) # shape[0] is number of token
             if n_centroids <= 2**8: 
                 idx_dtype = np.uint8
             elif n_centroids <= 2**16:  
@@ -152,16 +165,93 @@ class TorchVectorQuantDevice:
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
             config.n_head, config.input_dim, task.prompt_len, task.gen_len,
             policy.gpu_batch_size)
-        shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
+        shape = ((prompt_len + gen_len - 1) , (gpu_batch_size * num_head), hidden_size // num_head)
         # NOTE: disable pin_memory due to high memory overhead
         pin_memory = False
-        k_cache = self.allocate(shape, np.float16,
-            comp_config=policy.comp_cache_config, pin_memory=pin_memory)
-        v_cache = self.allocate(shape, np.float16,
-            comp_config=policy.comp_cache_config, pin_memory=pin_memory)
-        return k_cache, v_cache
+        k_cache_idx = self.allocate(shape, np.float16,
+            vectorquant_config=policy.vector_quant_cache_config, pin_memory=pin_memory, codebook=False)
+        v_cache_idx = self.allocate(shape, np.float16,
+            vectorquant_config=policy.vector_quant_cache_config, pin_memory=pin_memory, codebook=False)   
+        return k_cache_idx, v_cache_idx
     
-    def simple_vq_quant(self, W, idx, centroids, quantizer, vectorquant_config):
+    def init_cache_one_gpu_batch_codebook(self, config, task, policy):
+        num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
+            config.n_head, config.input_dim, task.prompt_len, task.gen_len,
+            policy.gpu_batch_size)
+        shape = (gpu_batch_size * num_head, hidden_size // num_head)
+        print(f"shape of cache: {shape}, dtype: {np.float16}")
+        # NOTE: disable pin_memory due to high memory overhead
+        pin_memory = False
+        k_cache_codebook = self.allocate(shape, np.float16,
+            vectorquant_config=policy.vector_quant_cache_config, pin_memory=pin_memory, codebook=True)
+        v_cache_codebook = self.allocate(shape, np.float16,
+            vectorquant_config=policy.vector_quant_cache_config, pin_memory=pin_memory, codebook=True)   
+        return k_cache_codebook, v_cache_codebook
+    
+    def simple_quant_cache(self, W, idx, centroids, quantizer, vectorquant_config):
+        assert len(W.shape) == 3, "Cache tensor must be 3D"
+        W1 = W.data.clone().float()
+        if W1.shape[0] != 1: # prefill
+            quantized_indices_list = []
+            train_codebook = True
+            for i in range(W1.shape[0]):
+                single_token_kv = W1[i:i+1]  
+                single_token_kv_2d = single_token_kv.squeeze(0)  
+                idx_tmp = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W.device)
+                idx_tmp, centroids_tmp = self.simple_vq_quant(
+                    single_token_kv_2d, idx_tmp, centroids, quantizer, vectorquant_config, train_codebook=train_codebook)
+                quantized_indices_list.append(idx_tmp.data[0].data)
+                if i == 0:
+                    train_codebook = False  # Only train codebook for the first token
+                
+            idx_tensor = torch.stack(quantized_indices_list, dim=0)
+            idx_tensor = TorchTensor.create_from_torch(idx_tensor, self.base_device)
+            return (ConfidentialTensor(W.shape, W.dtype, (idx_tensor, quantizer, vectorquant_config), self),
+                    centroids_tmp)
+        else:  # generation
+            single_token_kv = W1.squeeze(0)  # [B, R, C]
+            idx_tmp = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W.device)
+            idx_tmp, centroids_tmp = self.simple_vq_quant(
+                single_token_kv, idx_tmp, centroids, quantizer, vectorquant_config)
+            return idx_tmp, centroids_tmp
+    
+    def simple_dequant_cache(self, idx, centroids):
+        idx, quantizer, _ = idx.data
+        centroids = centroids.data[0]
+        cache_list = []
+        for i in range(idx.shape[0]):
+            single_token_idx = idx[i:i+1]
+            single_token_idx_2d = single_token_idx.squeeze(0)  # [R, C]
+            w = quantizer.dequantize(single_token_idx_2d, centroids)
+            cache_list.append(w)
+        cache_tensor = torch.stack(cache_list, dim=0)
+        return cache_tensor
+        
+
+    def init_attention_compute_workspace(self, config, task, policy):
+        if self.base_device.device_type != DeviceType.CPU:
+            return  # Only CPU requires this fp32 workspace
+
+        b = policy.gpu_batch_size
+        n_head = config.n_head
+        head_dim = config.input_dim // n_head
+        max_seq_len = task.prompt_len + task.gen_len - 1
+        shape = (max_seq_len, b * n_head, head_dim)
+
+        group_size, group_dim = (
+            policy.comp_cache_config.group_size, policy.comp_cache_config.group_dim)
+        num_groups = (shape[group_dim] + group_size - 1) // group_size
+        new_shape = (shape[:group_dim] + (num_groups, group_size) +
+                     shape[group_dim+1:])
+
+        self.data_decompress_workspace = [
+            torch.empty(*new_shape, dtype=torch.float32,
+                device=self.base_device.dev),
+            torch.empty(*new_shape, dtype=torch.float32,
+                device=self.base_device.dev),
+        ]
+    
+    def simple_vq_quant(self, W, idx, centroids, quantizer, vectorquant_config, train_codebook=False):
         import time
         total_start = time.time()
         W1 = W.data.clone()
@@ -180,12 +270,13 @@ class TorchVectorQuantDevice:
             group_start = time.time()
             end = min(i + quantizer.groupsize, W.shape[1])
             W_group = W1[:, i:end].clone()
-
-            find_param_start = time.time()
-            centroids[n_group] = quantizer.find_param(W_group)
-            find_param_end = time.time()
-            find_param_time = find_param_end - find_param_start
-            total_find_param_time += find_param_time
+            
+            if train_codebook:
+                find_param_start = time.time()
+                centroids[n_group] = quantizer.find_param(W_group)
+                find_param_end = time.time()
+                find_param_time = find_param_end - find_param_start
+                total_find_param_time += find_param_time
 
             vq_start = time.time()
             for j in range(quantizer.groupsize):
@@ -216,8 +307,8 @@ class TorchVectorQuantDevice:
         centroids = TorchTensor.create_from_torch(centroids, self.base_device)
    
         return (
-            ConfidentialTensor(idx.shape, idx.dtype, (idx, quantizer, vectorquant_config), self), 
-            ConfidentialTensor(centroids.shape, centroids.dtype, (centroids, quantizer, vectorquant_config), self, is_confidential=True, is_codebook=True),
+            ConfidentialTensor(W.shape, W.dtype, (idx, quantizer, vectorquant_config), self), 
+            ConfidentialTensor(W.shape, W.dtype, (centroids, quantizer, vectorquant_config), self, is_confidential=True, is_codebook=True),
         )
     
     def optimize_index_desensitization(self, idx_tensor, centroids_tensor, quantizer):
@@ -299,7 +390,7 @@ class TorchVectorQuantDevice:
         w = quantizer.dequantize(idx, centroids)
         return w
     
-    def create_tmp_tensor(self, X, quantizer):
+    def create_tmp_tensor(self, quantizer):
         """创建临时张量"""
         idx_shape = quantizer.idx_shape
         centroids_shape = quantizer.centroids_shape
@@ -456,3 +547,6 @@ def verify_consistency(idx, centroids, original_mapping, quantizer):
                 # 验证结果
                 if old_idx is None:
                     print(f"警告: 在批次{n}行{r}列{c}处找不到匹配的原始向量")
+
+
+

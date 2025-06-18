@@ -1,3 +1,8 @@
+import torch
+from torch.nn import functional as F
+import vector_quant
+from vector_quant import simple_vector_quantize_gpu, simple_vector_dequantize_gpu_optimized
+
 def train_codebook_simple(W, groupsize, vq_dim, G_centroids, n_centroids, 
                          kmeans_iters=10, init_method="kmeans++", verbose=True):
     """
@@ -326,7 +331,7 @@ def test_vector_quantization_with_training():
     # 然后测试原有的固定码本
     print("\n" + "="*60)
     print("对比：使用固定码本的量化结果")
-    test_vector_quantization()
+
 
 
 if __name__ == "__main__":

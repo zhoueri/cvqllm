@@ -191,8 +191,8 @@ class ConfidentialTensor(TorchTensor):
             assert codebook is not None, "codebook must be provided for vector quantization"
             assert isinstance(codebook, ConfidentialTensor), "codebook must be a ConfidentialTensor object"
             tmp = torch.from_numpy(np_array)
-            idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.create_tmp_tensor(tmp, codebook.data[1])
-            idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.simple_vq_quant(tmp, idx_tmp, codebook_tmp, codebook.data[1], codebook.data[2])
+            idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.create_tmp_tensor(codebook.data[1])
+            idx_tmp, codebook_tmp = global_cpu_device.vector_quant_device.simple_vq_quant(tmp, idx_tmp, codebook_tmp, codebook.data[1], codebook.data[2], train_codebook=True)
             general_copy_confidential(self, None, idx_tmp, None)
             general_copy_confidential(codebook, None, codebook_tmp, None)
             del idx_tmp, codebook_tmp
@@ -214,7 +214,7 @@ class ConfidentialTensor(TorchTensor):
         else:
             shape = self.shape
         if dst.device_type == DeviceType.VECTORQUANT:
-            ret = dst.allocate(shape, self.dtype, self.data[2], quantizer=self.data[1], is_codebook=dst.is_codebook)
+            ret = dst.allocate(shape, torch_dtype_to_np_dtype[self.dtype], self.data[2], quantizer=self.data[1], codebook=self.is_codebook)
             general_copy_confidential(ret, None, self, src_indices)
         else:
             ret = super().copy(dst, src_indices)

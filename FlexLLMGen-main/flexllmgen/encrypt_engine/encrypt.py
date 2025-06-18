@@ -1,6 +1,7 @@
 import cuda_aes
 import torch
 import numpy as np
+import binascii
 from Crypto.Cipher import AES
 from Crypto.Util import Counter
 
@@ -29,23 +30,15 @@ def encrypt_tensor_aes_ctr(tensor: torch.Tensor, key_hex: str = key, iv_hex: str
     tensor_cpu = tensor
     
     # 将密钥和IV从十六进制字符串转换为字节
-    key_bytes = bytes.fromhex(key_hex)
-    iv_bytes = bytes.fromhex(iv_hex)
-    
-    # 确保密钥长度为16字节 (128位)
-    if len(key_bytes) != 16:
-        raise ValueError(f"密钥长度必须为16字节，当前为{len(key_bytes)}字节")
-    
+    key = binascii.unhexlify(key_hex.replace(' ', ''))
+    iv = binascii.unhexlify(iv_hex.replace(' ', ''))
     # 将张量数据转换为字节
     tensor_bytes = tensor_cpu.numpy().tobytes()
     
     # 创建CTR模式的Counter对象
-    # AES块大小为16字节，使用前12字节作为nonce，后4字节作为计数器
-    nonce = iv_bytes[:12]  # 取前12字节作为nonce
-    counter = Counter.new(32, nonce=nonce, initial_value=int.from_bytes(iv_bytes[12:16], 'big'))
-    
+    ctr = Counter.new(128, initial_value=int.from_bytes(iv, byteorder='big'))    
     # 创建AES-CTR加密器
-    cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
+    cipher = AES.new(key, AES.MODE_CTR, counter=ctr)
     
     # 加密数据
     encrypted_bytes = cipher.encrypt(tensor_bytes)
@@ -81,15 +74,14 @@ def decrypt_tensor_aes_ctr(encrypted_tensor: torch.Tensor, key_hex: str = key, i
     tensor_cpu = encrypted_tensor
     
     # 将密钥和IV从十六进制字符串转换为字节
-    key_bytes = bytes.fromhex(key_hex)
-    iv_bytes = bytes.fromhex(iv_hex)
+    key_bytes = binascii.unhexlify(key_hex.replace(' ', ''))
+    iv_bytes = binascii.unhexlify(iv_hex.replace(' ', ''))
     
     # 将张量数据转换为字节
     encrypted_bytes = tensor_cpu.numpy().tobytes()
     
     # 创建CTR模式的Counter对象（与加密时相同）
-    nonce = iv_bytes[:12]
-    counter = Counter.new(32, nonce=nonce, initial_value=int.from_bytes(iv_bytes[12:16], 'big'))
+    counter = Counter.new(128, initial_value=int.from_bytes(iv_bytes, byteorder='big'))
     
     # 创建AES-CTR解密器
     cipher = AES.new(key_bytes, AES.MODE_CTR, counter=counter)
@@ -110,13 +102,13 @@ def decrypt_tensor_aes_ctr(encrypted_tensor: torch.Tensor, key_hex: str = key, i
 
 def encrypt_tensor_cuda_aes_ctr(tensor: torch.Tensor, key_hex: str = key, iv_hex: str = iv) -> torch.Tensor:
     encrypted_tensor, enc_stats = cuda_aes.encrypt_tensor_gpu_direct(
-        tensor, key, iv, verbose=True
+        tensor, key, iv, verbose=False
     )
     return encrypted_tensor
 
 def decrypt_tensor_cuda_aes_ctr(encrypted_tensor: torch.Tensor, key_hex: str = key, iv_hex: str = iv) -> torch.Tensor:
     decrypted_tensor, dec_stats = cuda_aes.decrypt_tensor_gpu_direct(
-        encrypted_tensor, key, iv, verbose=True
+        encrypted_tensor, key, iv, verbose=False
     )
     return decrypted_tensor
 

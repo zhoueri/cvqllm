@@ -24,7 +24,7 @@ from flexllmgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
     torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
     read_benchmark_log)
-from flexllmgen.vector_quant import VectorQuantConfig
+from flexllmgen.vector_quant import VectorQuantConfig, general_copy_confidential
 from flexllmgen.debug_tool.memory_monitor import print_memory_usage
 
 fix_recursive_import()
@@ -70,6 +70,10 @@ class Policy:
 
     vector_quant: bool
     vector_quant_config: VectorQuantConfig
+    
+    vector_quant_cache: bool
+    vector_quant_cache_config: VectorQuantConfig
+    
 
     @property
     def w_disk_percent(self):
@@ -204,17 +208,20 @@ class InputEmbed:
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
+    
+    def init_cache_codebook_one_gpu_batch(self, cache_codebook_home):
+        pass # do nothing
 
-    def load_cache(self, cache_home, cache_read_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cache_codebook_home, cache_codebook_read_buf, i):
         pass  # do nothing
 
-    def store_cache(self, cache_home, cache_write_buf, i):
+    def store_cache(self, cache_home, cache_write_buf, cache_codebook_home, cache_codebook_write_buf, i):
         pass  # do nothing
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len), np.int64
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+    def forward(self, hidden, cache_read_buf, cache_codebook_read_buf, cache_codebook_write_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
         # Compute input embedding
         donate = [False] * 4
@@ -295,17 +302,20 @@ class OutputEmbed:
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
-
-    def load_cache(self, cache_home, cache_read_buf, i):
+    
+    def init_cache_codebook_one_gpu_batch(self, cache_codebook_home):
         pass  # do nothing
 
-    def store_cache(self, cache_home, cache_write_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cache_codebook_home, cache_codebook_read_buf, i):
+        pass  # do nothing
+
+    def store_cache(self, cache_home, cache_write_buf, cache_codebook_home, cache_codebook_write_buf, i):
         pass  # do nothing
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+    def forward(self, hidden, cache_read_buf, cache_codebook_read_buf, cache_codebook_write_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
         donate = [False] * 4
         h, donate[0] = hidden.val, True
@@ -330,9 +340,12 @@ class SelfAttention:
         self.layer_id = layer_id
         self.policy = policy
         self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.vector_quant_device if policy.vector_quant else
-                        self.compute.compressed_device if policy.compress_weight else
-                        self.compute)
+        if policy.vector_quant:
+            self.weight_load_dst = self.compute.vector_quant_device
+        elif policy.compress_weight:
+            self.weight_load_dst = self.compute.compressed_device
+        else:
+            self.weight_load_dst = self.compute
         self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
             else self.env.gpu)
 
@@ -411,20 +424,53 @@ class SelfAttention:
         if self.policy.compress_cache:
             assert device.device_type != DeviceType.MIXED
             device = device.compressed_device
+        elif self.policy.vector_quant:
+            assert device.device_type != DeviceType.MIXED
+            device = device.vector_quant_device
 
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)
+    
+    def init_cache_codebook_one_gpu_batch(self, cache_codebook_home):
+        if self.policy.cache_gpu_percent == 100:
+            device = self.env.gpu
+        elif self.policy.cache_cpu_percent == 100:
+            device = self.env.cpu
+        elif self.policy.cache_disk_percent == 100:
+            device = self.env.disk
+        else:
+            device = self.env.mixed
+        
+        if self.policy.vector_quant is None:
+            raise NotImplementedError("Codebook initialization for compressed cache is not supported yet.")
+        else:
+            assert device.device_type != DeviceType.MIXED
+            device = device.vector_quant_device
+        
+        codebook = device.init_cache_one_gpu_batch_codebook(self.config, self.task, self.policy)
+        cache_codebook_home.store(codebook)
 
-    def load_cache(self, cache_home, cache_read_buf, i):
-        if i == 0:  # prefill, no cache
+    def load_cache(self, cache_home, cache_read_buf, cache_codebook_home, cache_codebook_read_buf, i):
+        if i == 0:  # prefill, no cache 
+            if self.policy.vector_quant:
+                k_codebook, v_codebook = cache_codebook_home.val
+                cache_codebook_read_buf.store((
+                    k_codebook.smart_copy(self.attention_compute.vector_quant_device),
+                    v_codebook.smart_copy(self.attention_compute.vector_quant_device)
+                ))
             return
 
+        if self.policy.vector_quant:
+            k_home_codebook, v_home_codebook = cache_codebook_home.val
+        
         k_home, v_home = cache_home.val
-
         # Pick code path
         if self.policy.compress_cache:
             path = 0
             dst = self.attention_compute.compressed_device
+        elif self.policy.vector_quant:
+            path = 0
+            dst = self.attention_compute.vector_quant_device
         else:
             if self.policy.cpu_cache_compute:
                 if (k_home.device.device_type == DeviceType.MIXED and
@@ -436,7 +482,25 @@ class SelfAttention:
                 path = 0
             dst = self.attention_compute
 
-        if path == 0:  # Direct copy
+        if path == 0 and self.policy.vector_quant:  # Direct copy     
+            idx_shape = k_home.data[0].shape
+            num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
+                self.config.n_head, self.config.input_dim, self.task.prompt_len, self.task.gen_len,
+                self.policy.gpu_batch_size)
+            indices = (slice(0, self.task.prompt_len + i),
+                       slice(0, k_home.data[0].shape[1]))
+            if self.policy.attn_sparsity >= 1.0:
+                cache_read_buf.store((
+                    k_home.smart_copy(dst, indices),
+                    v_home.smart_copy(dst, indices),
+                ))
+                cache_codebook_read_buf.store((
+                    k_codebook.smart_copy(dst),
+                    v_codebook.smart_copy(dst),
+                ))
+            else:
+                raise NotImplementedError("Vector quantization with sparsity < 1.0 is not supported yet.")
+        elif path == 0:  # Copy to GPU temporary workspace
             # shape: (s, b * n_head, head_dim)
             indices = (slice(0, self.task.prompt_len + i),
                        slice(0, k_home.shape[1]))
@@ -482,29 +546,52 @@ class SelfAttention:
         else:
             raise ValueError(f"Invalid path: {path}")
 
-    def store_cache(self, cache_home, cache_write_buf, i):
+    def store_cache(self, cache_home, cache_write_buf, cache_codebook_home, cache_codebook_write_buf, i):
         # shape: (s, b * n_head, head_dim)
+
         k_home, v_home = cache_home.val
         k_new, v_new = cache_write_buf.pop()
+        
 
         if i == self.task.gen_len - 1:  # last token, no need to store cache
             return
 
         if i == 0:  # prefill
-            indices = (slice(0, k_new.shape[0]),
+            if self.policy.vector_quant:
+            # idx indice
+                indices = (slice(0, k_new.data[0].shape[0]),
+                           slice(0, k_new.data[0].shape[1]))
+            else:
+                indices = (slice(0, k_new.shape[0]),
                        slice(0, k_new.shape[1]))
         else:  # decoding
-            pos = self.task.prompt_len + i
-            indices = (slice(pos - k_new.shape[0], pos),
+            if self.policy.vector_quant:
+            # idx indice
+                pos = self.task.prompt_len + i - 1
+                indices = (slice(pos - k_new.data[0].shape[0], pos),
+                           slice(0, k_new.data[0].shape[1]))
+            else:
+                pos = self.task.prompt_len + i
+                indices = (slice(pos - k_new.shape[0], pos),
                        slice(0, k_new.shape[1]))
 
-        general_copy(k_home, indices, k_new, None)
-        general_copy(v_home, indices, v_new, None)
+        if self.policy.vector_quant:
+            # Copy codebook and indices to new cache
+            if i == 0: 
+                k_codebook_home, v_codebook_home = cache_codebook_home.val
+                k_codebook_new, v_codebook_new = cache_codebook_write_buf.pop()
+                general_copy_confidential(k_codebook_home, None, k_codebook_new, None)
+                general_copy_confidential(v_codebook_home, None, v_codebook_new, None)
+            general_copy_confidential(k_home, indices, k_new, None)
+            general_copy_confidential(v_home, indices, v_new, None)
+        else:
+            general_copy(k_home, indices, k_new, None)
+            general_copy(v_home, indices, v_new, None)
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+    def forward(self, hidden, cache_read_buf, cache_codebook_read_buf, cache_codebook_write_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
         n_head = self.config.n_head
 
@@ -531,10 +618,23 @@ class SelfAttention:
             h, new_k_cache, new_v_cache = self.compute.mha(h, mask, weight, 
                     codebook, idx_position, n_head, donate,
                 self.policy.compress_cache, self.policy.comp_cache_config)
-            cache_write_buf.store((new_k_cache, new_v_cache))
+            if self.policy.vector_quant:
+                (k_codebook, _), (v_codebook, _) = cache_codebook_read_buf.pop()
+                tmp_k_idx, tmp_k_codebook = k_codebook.device.simple_quant_cache(new_k_cache, None, k_codebook.data[0], k_codebook.data[1], k_codebook.data[2])
+                tmp_v_idx, tmp_v_codebook = v_codebook.device.simple_quant_cache(new_v_cache, None, v_codebook.data[0], v_codebook.data[1], v_codebook.data[2])
+                cache_write_buf.store((tmp_k_idx, tmp_v_idx))
+                cache_codebook_write_buf.store((tmp_k_codebook, tmp_v_codebook))
+            else:
+                cache_write_buf.store((new_k_cache, new_v_cache))
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
-            (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
+            if self.policy.vector_quant:
+                (k_idx, donate[12]), (v_idx, donate[13])  = cache_read_buf.pop()
+                (k_codebook, _), (v_codebook, _) = cache_codebook_read_buf.pop()
+                k_cache = k_codebook.simple_dequant_cache(k_idx, k_codebook)
+                v_cache = v_codebook.simple_dequant_cache(v_idx, v_codebook)
+            else:
+                (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
             # h, new_k_cache, new_v_cache = self.compute.mha_gen(h, mask, w_q,
             #     b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head,
             #     k_cache, v_cache, donate, self.policy.attn_sparsity,
@@ -543,7 +643,13 @@ class SelfAttention:
                     codebook, idx_position, n_head,
                 k_cache, v_cache, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config)
-            cache_write_buf.store((new_k_cache, new_v_cache))
+            
+            if self.policy.vector_quant:
+                tmp_k_idx, _ = k_codebook.device.simple_quant_cache(new_k_cache, None, k_codebook.data[0], k_codebook.data[1], k_codebook.data[2])
+                tmp_v_idx, _ = v_codebook.device.simple_quant_cache(new_v_cache, None, v_codebook.data[0], v_codebook.data[1], v_codebook.data[2])
+                cache_write_buf.store((tmp_k_idx, tmp_v_idx))
+            else:
+                cache_write_buf.store((new_k_cache, new_v_cache))
 
         hidden.val = h
 
@@ -614,17 +720,20 @@ class MLP:
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
-
-    def load_cache(self, cache_home, cache_read_buf, i):
+    
+    def init_cache_codebook_one_gpu_batch(self, cache_codebook_home):
         pass  # do nothing
 
-    def store_cache(self, cache_home, cache_write_buf, i):
+    def load_cache(self, cache_home, cache_read_buf, cache_codebook_home, cache_codebook_read_buf, i):
+        pass  # do nothing
+
+    def store_cache(self, cache_home, cache_write_buf, cache_codebook_home, cache_codebook_write_buf, i):
         pass  # do nothing
 
     def input_act_shape_and_dtype(self, batch_size, seq_len):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+    def forward(self, hidden, cache_read_buf, cache_codebook_read_buf, cache_codebook_write_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
         donate = [False] * 7
         h, donate[0] = hidden.val, True
@@ -671,23 +780,26 @@ class TransformerLayer:
 
     def init_cache_one_gpu_batch(self, cache_home):
         self.attention.init_cache_one_gpu_batch(cache_home)
+    
+    def init_cache_codebook_one_gpu_batch(self, cache_codebook_home):
+        self.attention.init_cache_codebook_one_gpu_batch(cache_codebook_home)
 
-    def load_cache(self, cache_home, cache_read_buf, i):
-        self.attention.load_cache(cache_home, cache_read_buf, i)
+    def load_cache(self, cache_home, cache_read_buf, cache_codebook_home, cache_codebook_read_buf, i):
+        self.attention.load_cache(cache_home, cache_read_buf, cache_codebook_home, cache_codebook_read_buf, i)
 
-    def store_cache(self, cache_home, cache_write_buf, i):
-        self.attention.store_cache(cache_home, cache_write_buf, i)
+    def store_cache(self, cache_home, cache_write_buf, cache_codebook_home, cache_codebook_write_buf, i):
+        self.attention.store_cache(cache_home, cache_write_buf, cache_codebook_home, cache_codebook_write_buf, i)
 
-    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+    def forward(self, hidden, cache_read_buf, cache_codebook_read_buf, cache_codebook_write_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
         if k == self.policy.num_gpu_batches - 1:
             read_buf1, read_buf2 = weight_read_buf.pop()
         else:
             read_buf1, read_buf2 = weight_read_buf.val
 
-        self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
+        self.attention.forward(hidden, cache_read_buf, cache_codebook_read_buf, cache_codebook_write_buf, read_buf1, attention_mask,
                                cache_write_buf, i, k)
-        self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
+        self.mlp.forward(hidden, None, None, None, read_buf2, attention_mask, None, i, k)
 
 
 class OptLM:
@@ -743,6 +855,10 @@ class OptLM:
         self.weight_read_buf = array_1d(num_layers, ValueHolder)
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
+        # cache_codebook[j]
+        self.cache_codebook_home = array_1d(num_layers, ValueHolder)
+        self.cache_codebook_read_buf = array_1d(num_layers, ValueHolder)
+        self.cache_codebook_write_buf = array_1d(num_layers, ValueHolder)
 
         self.task = None
         self.init_all_weights()
@@ -793,11 +909,13 @@ class OptLM:
 
     def init_cache(self, j, k):
         self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
+        if self.policy.vector_quant_cache:
+            self.layers[j].init_cache_codebook_one_gpu_batch(self.cache_codebook_home[j])
 
     def load_cache(self, i, j, k, overlap=True):
         # Handle corner cases
-        if i == 0:  # prefill, no cache
-            return
+        # if i == 0:  # prefill, no cache
+        #     return
         if k == self.num_gpu_batches:
             k = 0
             j += 1
@@ -810,10 +928,10 @@ class OptLM:
         # Load from cache_home to cache_read_buf
         if overlap:
             with torch.cuda.stream(self.load_cache_stream):
-                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], self.cache_codebook_home[j], self.cache_codebook_read_buf[j], i)
         else:
-            self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
-
+            self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], self.cache_codebook_home[j], self.cache_codebook_read_buf[j],i)
+            
     def store_cache(self, i, j, k, overlap=True):
         # Handle corner cases
         if k == -1:
@@ -832,15 +950,20 @@ class OptLM:
         # Delete cache_write_buf
         if overlap:
             with torch.cuda.stream(self.store_cache_stream):
-                self.layers[j].store_cache(self.cache_home[j][k], self.cache_write_buf[j][k], i)
+                self.layers[j].store_cache(self.cache_home[j][k], self.cache_write_buf[j][k], self.cache_codebook_home[j], self.cache_codebook_write_buf[j], i)
         else:
-            self.layers[j].store_cache(self.cache_home[j][k], self.cache_write_buf[j][k], i)
+            self.layers[j].store_cache(self.cache_home[j][k], self.cache_write_buf[j][k], self.cache_codebook_home[j], self.cache_codebook_write_buf[j], i)
 
     def delete_cache(self, j, k):
         v = self.cache_home[j][k].pop()
         if v:
             for x in v:
                 x.delete()
+        if self.policy.vector_quant_cache:
+            v_codebook = self.cache_codebook_home[j].pop()
+            if v_codebook:
+                for x in v_codebook:
+                    x.delete()
 
     def load_hidden(self, i, j, k):
         # Handle corner cases
@@ -903,7 +1026,8 @@ class OptLM:
         # Clear the weight_read_buf if it is the last gpu batch
         # Clear the cache_read_buf
         # Run layer computation
-        self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
+        self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k], 
+            self.cache_codebook_read_buf[j], self.cache_codebook_write_buf[j], 
             self.weight_read_buf[j], self.attention_mask[k],
             self.cache_write_buf[j][k], i, k)
 
@@ -982,6 +1106,9 @@ class OptLM:
                 self.cache_write_buf[j][k].clear()
         for j in range(num_layers):
             self.weight_read_buf[j].clear()
+            self.cache_codebook_home[j].clear()
+            self.cache_codebook_read_buf[j].clear()
+            self.cache_codebook_write_buf[j].clear()
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
@@ -1326,7 +1453,10 @@ def run_flexllmgen(args):
                     CompressionConfig(num_bits=4, group_size=64,
                                       group_dim=2, symmetric=False),
                     args.vector_quant,
-                    VectorQuantConfig(wbit=args.wbits))
+                    VectorQuantConfig(wbit=args.wbits),
+                    args.vector_quant_cache,
+                    VectorQuantConfig(wbit=args.wbits)
+                    )
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     opt_config = get_opt_config(args.model)
@@ -1430,6 +1560,8 @@ def add_parser_arguments(parser):
         help="Whether to use vector quantization.")
     parser.add_argument("--compress-cache", action="store_true",
         help="Whether to compress cache.")
+    parser.add_argument("--vector-quant-cache", action="store_true",
+        help="Whether to use vector quantization to quant cache.")
 
 
     parser.add_argument("--log-file", type=str, default="auto")
