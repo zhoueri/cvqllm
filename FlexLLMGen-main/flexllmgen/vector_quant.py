@@ -118,19 +118,27 @@ class TorchVectorQuantDevice:
             row, col = shape
         elif len(shape) == 3:
             row, col = shape[1], shape[2] # "for kv cache"
+            print(f"shape of kv cache: {shape}, row: {row}, col: {col}")
         else:
             raise ValueError(f"Unsupported shape {shape}, only 2D or 3D tensors are supported")
-        
+        new_shape = (row, col)
         if quantizer is None:
             quantizer = VectorQuantizer(vectorquant_config)
             quantizer.configure(vectorquant_config.wbit) 
-        groupsize, centroids_G = quantizer.get_groupsize(shape, vectorquant_config.groupsize) # "In most case, G = shape[0]"
+        groupsize, centroids_G = quantizer.get_groupsize(new_shape, vectorquant_config.groupsize) # "In most case, G = shape[0]"
         print(f"groupsize: {groupsize}, centroids_G: {centroids_G}")
         quantizer.groupsize = groupsize
         quantizer.centroids_G = centroids_G
         n_groups = (row // centroids_G) * (col // groupsize) # "Number of quant groups"
+        quantizer.n_groups = n_groups
         assert col % groupsize == 0, f"shape[1] {col} is not divisible by groupsize {groupsize}"
-        
+        if n_centroids <= 2**8: 
+            idx_dtype = np.uint8
+        elif n_centroids <= 2**16:  
+            idx_dtype = np.uint16
+        else:  
+            idx_dtype = np.int64
+        quantizer.idx_dtype = idx_dtype
         if codebook:
             assert len(shape) == 2, "Only 2D tensor is supported"
             centroids_shape = (np.int64(n_groups), np.int64(centroids_G), np.int64(n_centroids), np.int64(vq_dim)) # "N x G x K x D"
@@ -147,15 +155,9 @@ class TorchVectorQuantDevice:
                 idx_shape = (np.int64(n_groups), np.int64(centroids_G), np.int64(groupsize // vq_dim)) # "N x G x R // N // D "
             else:
                 idx_shape = (shape[0] ,np.int64(n_groups), np.int64(centroids_G), np.int64(groupsize // vq_dim)) # shape[0] is number of token
-            if n_centroids <= 2**8: 
-                idx_dtype = np.uint8
-            elif n_centroids <= 2**16:  
-                idx_dtype = np.uint16
-            else:  
-                idx_dtype = np.int64
 
             quantizer.idx_shape = idx_shape
-            quantizer.idx_dtype = idx_dtype
+
             idx = self.base_device.allocate(idx_shape, idx_dtype, pin_memory=pin_memory, name=name) 
             return ConfidentialTensor(shape, np_dtype_to_torch_dtype[dtype], 
                             (idx, quantizer, vectorquant_config), self, is_confidential=False, name = name)
@@ -167,6 +169,7 @@ class TorchVectorQuantDevice:
             policy.gpu_batch_size)
         shape = ((prompt_len + gen_len - 1) , (gpu_batch_size * num_head), hidden_size // num_head)
         # NOTE: disable pin_memory due to high memory overhead
+        print(f"shape of cache: {shape}")
         pin_memory = False
         k_cache_idx = self.allocate(shape, np.float16,
             vectorquant_config=policy.vector_quant_cache_config, pin_memory=pin_memory, codebook=False)
@@ -190,16 +193,20 @@ class TorchVectorQuantDevice:
     
     def simple_quant_cache(self, W, idx, centroids, quantizer, vectorquant_config):
         assert len(W.shape) == 3, "Cache tensor must be 3D"
+        print(f"shape of W: {W.shape}, dtype: {W.dtype}, device: {W.device}")
         W1 = W.data.clone().float()
+        idx_shape = (quantizer.n_groups, quantizer.centroids_G, quantizer.groupsize // vectorquant_config.vq_dim)
+        print(f"shape of idx: {idx_shape}, dtype: {np_dtype_to_torch_dtype[quantizer.idx_dtype]}, device: {W.device.dev}")
         if W1.shape[0] != 1: # prefill
             quantized_indices_list = []
             train_codebook = True
             for i in range(W1.shape[0]):
                 single_token_kv = W1[i:i+1]  
-                single_token_kv_2d = single_token_kv.squeeze(0)  
-                idx_tmp = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W.device)
+                single_token_kv_2d = single_token_kv.squeeze(0)
+                print(f"shape of single_token_kv_2d: {single_token_kv_2d.shape}, dtype: {single_token_kv_2d.dtype}, device: {W.device}")  
+                idx_tmp = torch.zeros(idx_shape, dtype=np_dtype_to_torch_dtype[quantizer.idx_dtype], device=W.device.dev)
                 idx_tmp, centroids_tmp = self.simple_vq_quant(
-                    single_token_kv_2d, idx_tmp, centroids, quantizer, vectorquant_config, train_codebook=train_codebook)
+                    single_token_kv_2d, idx_tmp, centroids.data, quantizer, vectorquant_config, train_codebook=train_codebook)
                 quantized_indices_list.append(idx_tmp.data[0].data)
                 if i == 0:
                     train_codebook = False  # Only train codebook for the first token
@@ -210,9 +217,9 @@ class TorchVectorQuantDevice:
                     centroids_tmp)
         else:  # generation
             single_token_kv = W1.squeeze(0)  # [B, R, C]
-            idx_tmp = torch.zeros(quantizer.idx_shape, dtype=quantizer.idx_dtype, device=W.device)
+            idx_tmp = torch.zeros(idx_shape, dtype=np_dtype_to_torch_dtype[quantizer.idx_dtype], device=W.device.dev)
             idx_tmp, centroids_tmp = self.simple_vq_quant(
-                single_token_kv, idx_tmp, centroids, quantizer, vectorquant_config)
+                single_token_kv, idx_tmp, centroids.data, quantizer, vectorquant_config)
             return idx_tmp, centroids_tmp
     
     def simple_dequant_cache(self, idx, centroids):
